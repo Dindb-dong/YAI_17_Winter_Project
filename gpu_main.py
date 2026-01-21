@@ -5,23 +5,23 @@
 # print("필요한 패키지 설치가 끝났습니다.")
 
 import os
-import torch
-import torchvision.io as io
-import torchvision.transforms.functional as F
+import torch  # type: ignore
+import torchvision.io as io  # type: ignore
+import torchvision.transforms.functional as F  # type: ignore
 import json
 import datetime
-import numpy as np
-from PIL import Image
-from transformers import CLIPProcessor, CLIPModel, Blip2Processor, Blip2ForConditionalGeneration
+import numpy as np  # type: ignore
+from PIL import Image  # type: ignore
+from transformers import CLIPProcessor, CLIPModel, Blip2Processor, Blip2ForConditionalGeneration  # type: ignore
 from typing import List 
-from google import genai
+from google import genai  # type: ignore
 import json
 import re
-from dotenv import load_dotenv
+from dotenv import load_dotenv  # type: ignore
 import time
 import random
-import matplotlib.pyplot as plt
-from matplotlib.patches import Circle
+import matplotlib.pyplot as plt  # type: ignore
+from matplotlib.patches import Circle  # type: ignore
 import shutil
 
 # ## 3. Gemini API 설정 & Model Manager
@@ -40,7 +40,7 @@ import shutil
 
 # 코랩 환경에서는 로딩이 다름
 # 좌측 패널 열쇠 모양 클릭 -> 새 보안 비밀 추가 -> 이름: GEMINI_API_KEY, 값: 실제 API 키값 따옴표 없이 그대로.
-from google.colab import userdata
+from google.colab import userdata  # type: ignore
 GEMINI_API_KEY = userdata.get('GEMINI_API_KEY')
 client = genai.Client(api_key=GEMINI_API_KEY, http_options=genai.types.HttpOptions(api_version="v1"))
 if client is not None:
@@ -144,6 +144,7 @@ class ModelManager:
 
 class VideoProcessor:
     def __init__(self, video_path, device="cuda"):
+        start_time = time.time()
         self.video_path = video_path
         self.device = device
         
@@ -155,20 +156,41 @@ class VideoProcessor:
         self.metadata = self.v_reader.get_metadata()
         self.fps = self.metadata['video']['fps'][0]
         
-        # 전체 프레임 수 계산 (지원되지 않는 코덱의 경우 0일 수 있음)
+        # duration 계산 (방법 A: 메타데이터에서 계산)
+        # VideoReader는 총 프레임 수를 직접 제공하지 않으므로, 
+        # 비디오를 한 번 순회하여 계산
+        self.total_frames = 0
         self.v_reader.seek(0)
-        print(f"✅ VideoProcessor 로드 완료 (FPS: {self.fps})")
+        try:
+            for _ in self.v_reader:
+                self.total_frames += 1
+        except StopIteration:
+            pass
+        
+        # duration = 총 프레임 수 / FPS
+        self.duration = self.total_frames / self.fps if self.fps > 0 else 0
+        
+        # 다시 처음으로 되돌림
+        self.v_reader.seek(0)
+        
+        self.init_time = time.time() - start_time
+        print(f"✅ VideoProcessor 로드 완료 (FPS: {self.fps}, 총 프레임: {self.total_frames}, Duration: {self.duration:.2f}초, 초기화 시간: {self.init_time:.2f}초)")
 
-    def extract_window_frames(self, start_sec, end_sec, num_samples_q):
+    def extract_window_frames(self, start_sec, end_sec, num_samples_q, window_idx=None, total_windows=None):
         """
         특정 구간에서 q개의 프레임을 순차적으로 추출하여 (224, 224)로 리사이징
+        
+        Args:
+            start_sec: 시작 시간 (초)
+            end_sec: 종료 시간 (초)
+            num_samples_q: 추출할 프레임 수
+            window_idx: 현재 윈도우 인덱스 (로깅용, optional)
+            total_windows: 전체 윈도우 수 (로깅용, optional)
         """
         frames = []
         # 구간 내 균등 간격 계산
         duration = end_sec - start_sec
         step = duration / max(1, (num_samples_q - 1))
-        
-        # 
         
         for i in range(num_samples_q):
             current_pos = start_sec + (i * step)
@@ -181,8 +203,8 @@ class VideoProcessor:
                 frame_data = next(self.v_reader)
                 
                 if frame_data is not None:
-                    if i == 0:
-                        print(f"  ✅ [{start_sec:.1f}s] 첫 프레임 읽기 성공!")
+                    if i == 0 and window_idx is not None:
+                        print(f"  ✅ [Window {window_idx}/{total_windows}] [{start_sec:.1f}s] 첫 프레임 읽기 성공!")
                     
                     # frame_data['data']는 [C, H, W] 텐서
                     img_tensor = frame_data['data'] # uint8 텐서
@@ -743,13 +765,12 @@ class AdaptiveSearchEngine:
                 frame_scores["best_split_index"] = int(best_split) if best_split != -1 else None
             else:
                 raw_scores_matrix = self.mm.get_clip_scores(frames, sub_queries)
-            
-            raw_score = float(np.mean(raw_scores_matrix))
-            # 각 프레임별 점수 저장
-            frame_scores = {
-                f"query_{i}": raw_scores_matrix[:, i].tolist()
-                for i in range(len(sub_queries))
-            }
+                raw_score = float(np.mean(raw_scores_matrix))
+                # 각 프레임별 점수 저장
+                frame_scores = {
+                    f"query_{i}": raw_scores_matrix[:, i].tolist()
+                    for i in range(len(sub_queries))
+                }
             clip_time = time.time() - clip_start
             total_clip_inference_time += clip_time
 
@@ -911,6 +932,34 @@ def cleanup_temp_images(path):
         shutil.rmtree(temp_path)
         print(f"🧹 임시 이미지 폴더가 성공적으로 정리되었습니다: {temp_path}")
 
+def collect_timing_data(total_elapsed_time, total_init_time, model_manager, video_processor, engine):
+    """
+    타이밍 정보를 수집하여 딕셔너리로 반환
+    
+    Args:
+        total_elapsed_time: 전체 실행 시간
+        total_init_time: 초기화 시간
+        model_manager: ModelManager 인스턴스
+        video_processor: VideoProcessor 인스턴스
+        engine: AdaptiveSearchEngine 인스턴스
+    
+    Returns:
+        dict: 타이밍 정보 딕셔너리
+    """
+    return {
+        "total_time": round(total_elapsed_time, 2),
+        "init_time": round(total_init_time, 2),
+        "model_manager_init_time": round(model_manager.init_time, 2),
+        "clip_load_time": round(model_manager.clip_load_time, 2),
+        "blip_load_time": round(model_manager.blip_load_time, 2),
+        "video_processor_init_time": round(video_processor.init_time, 2),
+        "api_call_time": round(engine.timing_info["api_call_time"], 2),
+        "frame_extraction_time": round(engine.timing_info["frame_extraction_time"], 2),
+        "clip_inference_time": round(engine.timing_info["clip_inference_time"], 2),
+        "blip_inference_time": round(engine.timing_info["blip_inference_time"], 2),
+        "total_search_time": round(engine.timing_info["total_search_time"], 2)
+    }
+
 # ==========================================
 # 5. Main Execution
 # ==========================================
@@ -998,19 +1047,8 @@ def main():
                         viz_filename = None
 
                     # 타이밍 정보 수집
-                    timing_data = {
-                        "total_time": round(total_elapsed_time, 2),
-                        "init_time": round(total_init_time, 2),
-                        "model_manager_init_time": round(model_manager.init_time, 2),
-                        "clip_load_time": round(model_manager.clip_load_time, 2),
-                        "blip_load_time": round(model_manager.blip_load_time, 2),
-                        "video_processor_init_time": round(video_processor.init_time, 2),
-                        "api_call_time": round(engine.timing_info["api_call_time"], 2),
-                        "frame_extraction_time": round(engine.timing_info["frame_extraction_time"], 2),
-                        "clip_inference_time": round(engine.timing_info["clip_inference_time"], 2),
-                        "blip_inference_time": round(engine.timing_info["blip_inference_time"], 2),
-                        "total_search_time": round(engine.timing_info["total_search_time"], 2)
-                    }
+                    timing_data = collect_timing_data(total_elapsed_time, total_init_time, 
+                                                    model_manager, video_processor, engine)
 
                     # Output Data Structure
                     output_data = {
@@ -1078,19 +1116,8 @@ def main():
             viz_filename = None
 
         # 타이밍 정보 수집
-        timing_data = {
-            "total_time": round(total_elapsed_time, 2),
-            "init_time": round(total_init_time, 2),
-            "model_manager_init_time": round(model_manager.init_time, 2),
-            "clip_load_time": round(model_manager.clip_load_time, 2),
-            "blip_load_time": round(model_manager.blip_load_time, 2),
-            "video_processor_init_time": round(video_processor.init_time, 2),
-            "api_call_time": round(engine.timing_info["api_call_time"], 2),
-            "frame_extraction_time": round(engine.timing_info["frame_extraction_time"], 2),
-            "clip_inference_time": round(engine.timing_info["clip_inference_time"], 2),
-            "blip_inference_time": round(engine.timing_info["blip_inference_time"], 2),
-            "total_search_time": round(engine.timing_info["total_search_time"], 2)
-        }
+        timing_data = collect_timing_data(total_elapsed_time, total_init_time, 
+                                        model_manager, video_processor, engine)
 
         # Output Data Structure
         output_data = {
