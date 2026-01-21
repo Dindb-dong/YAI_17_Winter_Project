@@ -73,7 +73,7 @@ class ModelManager:
                 "Salesforce/blip2-opt-2.7b",
                 use_fast=True)
             self.blip_model = Blip2ForConditionalGeneration.from_pretrained(
-                "Salesforce/blip2-opt-2.7b", torch_dtype=torch.float16
+                "Salesforce/blip2-opt-2.7b", dtype=torch.float16
             ).to(self.device)
             self.blip_model.eval()
             blip_time = time.time() - blip_start
