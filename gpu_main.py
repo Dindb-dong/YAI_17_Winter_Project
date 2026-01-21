@@ -23,6 +23,7 @@ import time
 import random
 import matplotlib.pyplot as plt
 from matplotlib.patches import Circle
+import shutil
 
 # ## 3. Gemini API 설정 & Model Manager
 # 
@@ -708,7 +709,11 @@ class AdaptiveSearchEngine:
         # 1. CLIP 기반 1차 검색 (Coarse-grained Search)
         window_idx = 0
         current_top_window = None
-
+        
+        temp_thumb_dir = os.path.join(save_path, "temp_thumbs")
+        if not os.path.exists(temp_thumb_dir):
+            os.makedirs(temp_thumb_dir)
+            
         while current_time < self.vp.duration:
             window_idx += 1
             end_time = min(current_time + p_sec, self.vp.duration)
@@ -750,6 +755,11 @@ class AdaptiveSearchEngine:
             clip_score_norm = self.normalize_score(raw_score)
             print(f"  -> 정규화 CLIP 점수: {clip_score_norm:.2f} (프레임 추출: {frame_time:.2f}초, CLIP 추론: {clip_time:.2f}초)")
 
+            mid_img = frames[len(frames)//2]
+            thumb_name = f"thumb_w{window_idx}_{current_time:.1f}.jpg"
+            thumb_path = os.path.join(temp_thumb_dir, thumb_name)
+            mid_img.save(thumb_path, "JPEG", quality=85) # 파일로 저장
+            
             window_data = {
                 "start": current_time,
                 "end": end_time,
@@ -757,9 +767,12 @@ class AdaptiveSearchEngine:
                 "raw_score": raw_score,           # 참고용 원본 점수
                 "clip_score_norm": clip_score_norm,    # 정규화된 점수 (JSON 저장용)
                 "frame_scores": frame_scores,  # 프레임별 점수 추가
-                "mid_frame": frames[len(frames)//2] # 보정을 위해 중간 프레임 저장
+                "temp_img_path": thumb_path,  # 경로만 저장 (RAM 소모 0)
             }
             all_windows.append(window_data)
+            
+            del frames
+            self.vp.clear_memory() # 메모리 정리
 
             # 현재까지 최고 점수 윈도우 추적
             if current_top_window is None or clip_score_norm > current_top_window['clip_score_norm']:
@@ -803,15 +816,16 @@ class AdaptiveSearchEngine:
 
                 # A. BLIP-2로 프레임 설명(Caption) 생성 - 시간 측정
                 blip_start = time.time()
-                generated_caption = self.mm.generate_caption(item['mid_frame'])
+                img_for_blip = Image.open(item['temp_img_path'])
+                item['blip_caption'] = self.mm.generate_caption(img_for_blip)
                 blip_time = time.time() - blip_start
                 total_blip_inference_time += blip_time
 
-                item['blip_caption'] = generated_caption
+                del img_for_blip
 
                 # B. 사용자 쿼리와 생성된 캡션 간의 의미적 유사도 계산 (Text-to-Text)
                 semantic_start = time.time()
-                semantic_sim = self.mm.compute_text_similarity(original_query, generated_caption)
+                semantic_sim = self.mm.compute_text_similarity(original_query, item['blip_caption'])
                 semantic_time = time.time() - semantic_start
                 total_blip_inference_time += semantic_time
 
@@ -820,7 +834,7 @@ class AdaptiveSearchEngine:
                 # C. 최종 점수 산출 (앙상블)
                 item['final_score'] = (item['clip_score_norm'] * weight_clip) + (semantic_sim * weight_semantic)
 
-                print(f"  -> 생성된 캡션: {generated_caption}")
+                print(f"  -> 생성된 캡션: {item['blip_caption']}")
                 print(f"  -> 의미 유사도: {semantic_sim:.4f}")
                 print(f"  -> 최종 점수: {item['final_score']:.4f}")
                 print(f"  -> BLIP-2 처리 시간: {blip_time + semantic_time:.2f}초\n")
@@ -854,14 +868,6 @@ class AdaptiveSearchEngine:
                 print(f"[시각화 오류] 최종 업데이트 실패: {e}")
                 import traceback
                 traceback.print_exc()
-
-        # 결과 저장 전 이미지 객체 삭제 (메모리 확보)
-        for item in top_k_candidates:
-            if 'mid_frame' in item: del item['mid_frame']
-
-        # all_windows에서도 이미지 객체 삭제
-        for item in all_windows:
-            if 'mid_frame' in item: del item['mid_frame']
 
         # 타이밍 정보 저장
         total_search_time = time.time() - search_start_time
@@ -897,6 +903,12 @@ class AdaptiveSearchEngine:
 
 # print("✅ 모델 초기화 완료! 이제 아래 실행 셀을 여러 번 실행해도 모델이 다시 로드되지 않습니다.")
 
+def cleanup_temp_images(path):
+    """임시 썸네일 폴더 삭제"""
+    temp_path = os.path.join(path, "temp_thumbs")
+    if os.path.exists(temp_path):
+        shutil.rmtree(temp_path)
+        print(f"🧹 임시 이미지 폴더가 성공적으로 정리되었습니다: {temp_path}")
 
 # ==========================================
 # 5. Main Execution
@@ -1040,6 +1052,7 @@ def main():
                     if viz_filename:
                         print(f"[시각화 저장 완료] {viz_filename}")
                     print(f"[총 실행 시간] {total_elapsed_time:.2f}초\n")
+                    cleanup_temp_images(SAVE_PATH)
 
     # 반복 실행 아닐 때
     else:
@@ -1137,6 +1150,7 @@ def main():
             print(f"     - BLIP-2 추론: {engine.timing_info['blip_inference_time']:.2f}초")
         print(f"     - 전체 검색: {engine.timing_info['total_search_time']:.2f}초")
         print(f"{'='*60}\n")
+        cleanup_temp_images(SAVE_PATH)
 
 if __name__ == "__main__":
     main()
