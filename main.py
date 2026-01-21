@@ -14,6 +14,8 @@ from google import genai
 import json
 import re
 from dotenv import load_dotenv
+import time
+import random
 
 # ==========================================
 # Gemini API 설정 (AdaptiveSearchEngine 내부 혹은 외부에 선언)
@@ -32,32 +34,38 @@ else:
 # # 현재 사용 가능한 모든 모델 리스트 출력
 # for model in client.models.list():
 #     print(f"Model Name: {model.name}, Supported Methods: {model.supported_actions}")
+# exit()
     
 # ==========================================
 # 1. Model Manager (CLIP & BLIP-2)
 # ==========================================
 class ModelManager:
     def __init__(self, use_blip=False, device=None):
+        start_time = time.time()
         print("Initializing ModelManager...")
         self.device = device if device else ("cuda" if torch.cuda.is_available() else "cpu")
         print(f"Loading models on {self.device}...")
 
         # Load CLIP (Base Model)
+        clip_start = time.time()
         self.clip_processor = CLIPProcessor.from_pretrained(
             "openai/clip-vit-base-patch32", 
             use_fast=True  # 이 옵션을 추가하면 Rust 기반의 빠른 전처리기를 사용합니다.
         )
         self.clip_model = CLIPModel.from_pretrained("openai/clip-vit-base-patch32").to(self.device)
         self.clip_model.eval()
-        print("CLIP Model loaded")
+        clip_time = time.time() - clip_start
+        print(f"CLIP Model loaded ({clip_time:.2f}초)")
 
         # Load BLIP-2 (Refinement Model) - Optional
         self.use_blip = use_blip
         self.blip_processor = None
         self.blip_model = None
+        blip_time = 0.0
         
         if self.use_blip:
             print("Loading BLIP-2 (this might take memory)...")
+            blip_start = time.time()
             self.blip_processor = Blip2Processor.from_pretrained(
                 "Salesforce/blip2-opt-2.7b",
                 use_fast=True)
@@ -65,7 +73,13 @@ class ModelManager:
                 "Salesforce/blip2-opt-2.7b", torch_dtype=torch.float16
             ).to(self.device)
             self.blip_model.eval()
-            print("BLIP-2 Model loaded")
+            blip_time = time.time() - blip_start
+            print(f"BLIP-2 Model loaded ({blip_time:.2f}초)")
+        
+        self.init_time = time.time() - start_time
+        self.clip_load_time = clip_time
+        self.blip_load_time = blip_time
+        print(f"ModelManager 초기화 완료 (총 {self.init_time:.2f}초)")
             
 
     def get_clip_scores(self, images: List[Image.Image], text_queries: List[str]) -> np.ndarray:
@@ -111,12 +125,14 @@ class ModelManager:
 # ==========================================
 class VideoProcessor:
     def __init__(self, video_path):
+        start_time = time.time()
         self.video_path = video_path
         self.cap = cv2.VideoCapture(video_path)
         self.fps = self.cap.get(cv2.CAP_PROP_FPS)
         self.total_frames = int(self.cap.get(cv2.CAP_PROP_FRAME_COUNT))
         self.duration = self.total_frames / self.fps
-        print("Video processor initialized")
+        self.init_time = time.time() - start_time
+        print(f"Video processor initialized ({self.init_time:.2f}초)")
     def extract_window_frames(self, start_sec, end_sec, num_samples_q, window_idx=None, total_windows=None) -> List[Image.Image]:
         """
         Extracts 'q' frames uniformly from the window [start_sec, end_sec].
@@ -154,6 +170,85 @@ class AdaptiveSearchEngine:
     def __init__(self, model_manager: ModelManager, video_processor: VideoProcessor):
         self.mm = model_manager
         self.vp = video_processor
+        # 타이밍 정보 저장
+        self.timing_info = {
+            "api_call_time": 0.0,
+            "clip_inference_time": 0.0,
+            "blip_inference_time": 0.0,
+            "frame_extraction_time": 0.0,
+            "total_search_time": 0.0
+        }
+
+    def _call_gemini_with_retry(self, prompt: str, max_retries: int = 5) -> str:
+        """
+        Exponential Backoff과 Jitter를 사용한 재시도 로직
+        
+        Args:
+            prompt: Gemini API에 전달할 프롬프트
+            max_retries: 최대 재시도 횟수
+            
+        Returns:
+            API 응답 텍스트
+        """
+        # 시도할 모델 리스트 (우선순위 순)
+        models = [
+            'models/gemini-2.0-flash-lite',
+            'models/gemini-2.0-flash',
+            'models/gemini-2.5-flash-lite'
+        ]
+        
+        for model_idx, model in enumerate(models):
+            for attempt in range(max_retries):
+                try:
+                    # Jitter 추가: 0.1~0.5초 랜덤 지연 (동시 요청 충돌 방지)
+                    if attempt > 0:
+                        jitter = random.uniform(0.1, 0.5)
+                        time.sleep(jitter)
+                    
+                    if attempt == 0 and model_idx == 0:
+                        print(f"  [API] {model} 호출 중...")
+                        print("429 Rate Limit 발생 시 최대 1분동안 더 시도합니다.")
+                    else:
+                        print(f"  [API] 재시도 {attempt + 1}/{max_retries} (모델: {model})...")
+                    
+                    # API 호출
+                    response = client.models.generate_content(
+                        model=model,
+                        contents=prompt
+                    )
+                    
+                    print(f"  [API] ✓ 성공!")
+                    return response.text.strip()
+                    
+                except Exception as e:
+                    error_str = str(e)
+                    
+                    # 429 Rate Limit 에러 처리
+                    if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
+                        # Exponential Backoff: 2^attempt 초 (최대 32초)
+                        wait_time = min(2 ** attempt, 32)
+                        # Jitter 추가: ±25% 랜덤 변동
+                        wait_time = wait_time * (1 + random.uniform(-0.25, 0.25))
+                        
+                        print(f"  [API] ⚠ Rate Limit 도달. {wait_time:.1f}초 대기 후 재시도...")
+                        time.sleep(wait_time)
+                        
+                        # 마지막 시도가 아니면 계속
+                        if attempt < max_retries - 1:
+                            continue
+                        else:
+                            # 이 모델로 마지막 시도 실패 시 다음 모델로
+                            if model_idx < len(models) - 1:
+                                print(f"  [API] ✗ {model} 실패. 다음 모델로 전환...")
+                                break
+                            else:
+                                raise Exception(f"모든 모델 시도 실패: {error_str}")
+                    
+                    # 기타 에러는 즉시 발생
+                    else:
+                        raise e
+        
+        raise Exception("Gemini API 호출 실패: 모든 재시도 소진")
 
     def split_query(self, text_query: str) -> tuple[list[str], str]:
         """
@@ -163,6 +258,7 @@ class AdaptiveSearchEngine:
         Returns:
             tuple: (분할된 쿼리 리스트, 분할 이유 설명)
         """
+        api_start_time = time.time()
         print(f"Thinking with Gemini (Korean Mode)... Query: '{text_query}'")
         
         # ---------------------------------------------------------
@@ -224,12 +320,8 @@ class AdaptiveSearchEngine:
         """
 
         try:
-            # API 호출
-            response = client.models.generate_content(
-                model='models/gemini-2.0-flash-lite',
-                contents=prompt
-            )
-            result_text = response.text.strip()
+            # API 호출 (Retry 로직 포함)
+            result_text = self._call_gemini_with_retry(prompt)
             
             if result_text.startswith("```"):
                 result_text = re.sub(r"```(json)?", "", result_text).strip()
@@ -242,7 +334,10 @@ class AdaptiveSearchEngine:
                 actions = [x["en"] for x in result["results"]]
                 reason = result.get("reason", "분할 완료")
                 
+                api_time = time.time() - api_start_time
+                self.timing_info["api_call_time"] = api_time
                 print(f" -> Gemini Split Result (EN): {actions} \n Reason: {reason}")
+                print(f" -> API 호출 시간: {api_time:.2f}초")
                 return actions, f"[Gemini API] {reason}"
             
         except Exception as e:
@@ -253,6 +348,9 @@ class AdaptiveSearchEngine:
         # ---------------------------------------------------------
         # API가 실패하거나 응답이 이상할 경우 작동하는 비상 로직입니다.
         # 한국어에서 순서를 나타내는 흔한 표현들을 기준으로 자릅니다.
+        
+        api_time = time.time() - api_start_time
+        self.timing_info["api_call_time"] = api_time
         
         delimiters = [
             " 그리고 ", " 다음에 ", " 그 후 ", " 그 뒤에 ", " 나서 ", 
@@ -267,10 +365,12 @@ class AdaptiveSearchEngine:
                 clean_parts = [p.strip() for p in parts if p.strip()]
                 if len(clean_parts) > 1:
                     print(f" -> Rule-based Split Result: {clean_parts}")
+                    print(f" -> Fallback 처리 시간: {api_time:.2f}초")
                     return clean_parts, f"[Rule-based] '{delim.strip()}' 구분자를 기준으로 분할했습니다."
 
         # 분할 실패 시 원본 그대로 반환
         print("Final split result: ", [text_query])
+        print(f" -> Fallback 처리 시간: {api_time:.2f}초")
         return [text_query], "[Rule-based] 시간 순서를 나타내는 표현이 없어 분할하지 않았습니다."
 
     def calculate_sequential_score(self, frames, sub_queries):
@@ -331,6 +431,13 @@ class AdaptiveSearchEngine:
         - 2. BLIP-2 기반 2차 보정 (Fine-grained Refinement)
         - 3. 최종 점수 산출 및 정렬
         """
+        search_start_time = time.time()
+        
+        # 타이밍 초기화
+        total_frame_extraction_time = 0.0
+        total_clip_inference_time = 0.0
+        total_blip_inference_time = 0.0
+        
         is_sequential = len(sub_queries) > 1
         
         all_windows = []
@@ -354,8 +461,14 @@ class AdaptiveSearchEngine:
             
             print(f"[Window {window_idx}/{total_windows}] 처리 중: {self.vp.get_timestamp_str(current_time)} - {self.vp.get_timestamp_str(end_time)}")
             
+            # 프레임 추출 시간 측정
+            frame_start = time.time()
             frames = self.vp.extract_window_frames(current_time, end_time, q_frames, window_idx, total_windows)
+            frame_time = time.time() - frame_start
+            total_frame_extraction_time += frame_time
             
+            # CLIP 추론 시간 측정
+            clip_start = time.time()
             if is_sequential:
                 raw_score, scores_matrix, best_split = self.calculate_sequential_score(frames, sub_queries)
                 # 각 프레임별 점수 저장 (시퀀셜의 경우 두 쿼리에 대한 점수)
@@ -372,8 +485,11 @@ class AdaptiveSearchEngine:
                     f"query_{i}": raw_scores_matrix[:, i].tolist() 
                     for i in range(len(sub_queries))
                 }
+            clip_time = time.time() - clip_start
+            total_clip_inference_time += clip_time
+            
             clip_score_norm = self.normalize_score(raw_score)
-            print(f"  -> 정규화 CLIP 점수: {clip_score_norm:.2f}")
+            print(f"  -> 정규화 CLIP 점수: {clip_score_norm:.2f} (프레임 추출: {frame_time:.2f}초, CLIP 추론: {clip_time:.2f}초)")
             
             window_data = {
                 "start": current_time,
@@ -415,12 +531,20 @@ class AdaptiveSearchEngine:
             for idx, item in enumerate(top_k_candidates, 1):
                 print(f"[후보 {idx}/{k_top}] {item['timestamp']}")
                 
-                # A. BLIP-2로 프레임 설명(Caption) 생성
+                # A. BLIP-2로 프레임 설명(Caption) 생성 - 시간 측정
+                blip_start = time.time()
                 generated_caption = self.mm.generate_caption(item['mid_frame'])
+                blip_time = time.time() - blip_start
+                total_blip_inference_time += blip_time
+                
                 item['blip_caption'] = generated_caption
                 
                 # B. 사용자 쿼리와 생성된 캡션 간의 의미적 유사도 계산 (Text-to-Text)
+                semantic_start = time.time()
                 semantic_sim = self.mm.compute_text_similarity(original_query, generated_caption)
+                semantic_time = time.time() - semantic_start
+                total_blip_inference_time += semantic_time
+                
                 item['semantic_consistency'] = semantic_sim
 
                 # C. 최종 점수 산출 (앙상블)
@@ -428,7 +552,8 @@ class AdaptiveSearchEngine:
                 
                 print(f"  -> 생성된 캡션: {generated_caption}")
                 print(f"  -> 의미 유사도: {semantic_sim:.4f}")
-                print(f"  -> 최종 점수: {item['final_score']:.4f}\n")
+                print(f"  -> 최종 점수: {item['final_score']:.4f}")
+                print(f"  -> BLIP-2 처리 시간: {blip_time + semantic_time:.2f}초\n")
             
             # 보정된 최종 점수로 다시 정렬
             top_k_candidates.sort(key=lambda x: x.get('final_score', x['clip_score_norm']), reverse=True)
@@ -444,6 +569,22 @@ class AdaptiveSearchEngine:
         # 결과 저장 전 이미지 객체 삭제 (메모리 확보)
         for item in top_k_candidates:
             if 'mid_frame' in item: del item['mid_frame']
+        
+        # 타이밍 정보 저장
+        total_search_time = time.time() - search_start_time
+        self.timing_info["frame_extraction_time"] = total_frame_extraction_time
+        self.timing_info["clip_inference_time"] = total_clip_inference_time
+        self.timing_info["blip_inference_time"] = total_blip_inference_time
+        self.timing_info["total_search_time"] = total_search_time
+        
+        print(f"\n{'='*60}")
+        print(f"[성능 통계]")
+        print(f"  - 프레임 추출 총 시간: {total_frame_extraction_time:.2f}초")
+        print(f"  - CLIP 추론 총 시간: {total_clip_inference_time:.2f}초")
+        if self.mm.use_blip:
+            print(f"  - BLIP-2 추론 총 시간: {total_blip_inference_time:.2f}초")
+        print(f"  - 전체 검색 시간: {total_search_time:.2f}초")
+        print(f"{'='*60}\n")
             
         return top_k_candidates
 
@@ -451,21 +592,24 @@ class AdaptiveSearchEngine:
 # 4. Main Execution
 # ==========================================
 def main():
+    # 전체 실행 시간 측정 시작
+    program_start_time = time.time()
+    
     # --- Configurations ---
     VIDEO_PATH = "sample_video.mp4" # 준비된 비디오 파일 경로
+    SAVE_PATH = "results"
+    if not os.path.exists(SAVE_PATH):
+        os.makedirs(SAVE_PATH)
+    else:
+        print(f"Save path '{SAVE_PATH}' already exists. Results will be saved here.")
     QUERY = "바닥에 떨어진 신용카드"
     # "바닥에 떨어지는 카드를 보고 난감한 표정을 짓는 남자" # 테스트 쿼리
     
     # Experiments Parameters
     p_list = [2.0, 4.0]      # 윈도우 크기 (초)
-    q_list = [24, 48]         # 샘플링 프레임 수
+    q_list = [12, 24, 48]         # 샘플링 프레임 수
     k_list = [3, 5]          # Top-K 개수
-    USE_BLIP = input("BLIP-2 사용 여부 (True/False): ")         # BLIP-2 사용 여부 (메모리 주의)
-    USE_BLIP = USE_BLIP.lower() == 'true'
-    if USE_BLIP:
-        print("BLIP-2 사용 중...")
-    else:
-        print("BLIP-2 사용 안 함...")
+    USE_BLIP = False         # BLIP-2 사용 여부 (메모리 주의)
     WEIGHT_CLIP = 0.7
     WEIGHT_SEMANTIC = 0.3
     USE_LOOP = False         # 반복 실행 여부
@@ -475,9 +619,12 @@ def main():
         print(f"Error: Video file '{VIDEO_PATH}' not found. Please place a dummy video.")
         return
 
+    # 초기화 시간 측정
+    init_start_time = time.time()
     model_manager = ModelManager(use_blip=USE_BLIP)
     video_processor = VideoProcessor(VIDEO_PATH)
     engine = AdaptiveSearchEngine(model_manager, video_processor)
+    total_init_time = time.time() - init_start_time
     
     print(f"\n[쿼리 분석] '{QUERY}'")
     sub_queries, split_reason = engine.split_query(QUERY)
@@ -493,10 +640,28 @@ def main():
                     # Perform Search
                     results = engine.search(QUERY, sub_queries, p, q, k, WEIGHT_CLIP, WEIGHT_SEMANTIC)
                     
+                    # 전체 실행 시간 계산
+                    total_elapsed_time = time.time() - program_start_time
+                    
                     # Construct Filename
                     model_name = "CB" if USE_BLIP else "Clip"
                     timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                    filename = f"{model_name}_{p}, {q}, {k}, {timestamp_str}.json"
+                    filename = f"{model_name}_{p}, {q}, {k}_{USE_BLIP}_{timestamp_str}_test.json"
+                    
+                    # 타이밍 정보 수집
+                    timing_data = {
+                        "total_time": round(total_elapsed_time, 2),
+                        "init_time": round(total_init_time, 2),
+                        "model_manager_init_time": round(model_manager.init_time, 2),
+                        "clip_load_time": round(model_manager.clip_load_time, 2),
+                        "blip_load_time": round(model_manager.blip_load_time, 2),
+                        "video_processor_init_time": round(video_processor.init_time, 2),
+                        "api_call_time": round(engine.timing_info["api_call_time"], 2),
+                        "frame_extraction_time": round(engine.timing_info["frame_extraction_time"], 2),
+                        "clip_inference_time": round(engine.timing_info["clip_inference_time"], 2),
+                        "blip_inference_time": round(engine.timing_info["blip_inference_time"], 2),
+                        "total_search_time": round(engine.timing_info["total_search_time"], 2)
+                    }
                     
                     # Output Data Structure
                     output_data = {
@@ -509,20 +674,41 @@ def main():
                             "model": model_name,
                             "timestamp": timestamp_str
                         },
+                        "time_used": timing_data,
                         "results": results
                     }
                     
                     # Save to JSON
-                    with open(filename, "w", encoding='utf-8') as f:
+                    with open(os.path.join(SAVE_PATH, filename), "w", encoding='utf-8') as f:
                         json.dump(output_data, f, indent=4, ensure_ascii=False)
                     
-                    print(f"\n[저장 완료] {filename}\n")
+                    print(f"\n[저장 완료] {filename}")
+                    print(f"[총 실행 시간] {total_elapsed_time:.2f}초\n")
                     
     else:
         results = engine.search(QUERY, sub_queries, p_list[0], q_list[0], k_list[0], WEIGHT_CLIP, WEIGHT_SEMANTIC)
+        
+        # 전체 실행 시간 계산
+        total_elapsed_time = time.time() - program_start_time
+        
         model_name = "CB" if USE_BLIP else "Clip"
         timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{model_name}_{p_list[0]}, {q_list[0]}, {k_list[0]}, {timestamp_str}.json"
+        filename = f"{model_name}_{p_list[0]}, {q_list[0]}, {k_list[0]}_{USE_BLIP}_{timestamp_str}_test.json"
+        
+        # 타이밍 정보 수집
+        timing_data = {
+            "total_time": round(total_elapsed_time, 2),
+            "init_time": round(total_init_time, 2),
+            "model_manager_init_time": round(model_manager.init_time, 2),
+            "clip_load_time": round(model_manager.clip_load_time, 2),
+            "blip_load_time": round(model_manager.blip_load_time, 2),
+            "video_processor_init_time": round(video_processor.init_time, 2),
+            "api_call_time": round(engine.timing_info["api_call_time"], 2),
+            "frame_extraction_time": round(engine.timing_info["frame_extraction_time"], 2),
+            "clip_inference_time": round(engine.timing_info["clip_inference_time"], 2),
+            "blip_inference_time": round(engine.timing_info["blip_inference_time"], 2),
+            "total_search_time": round(engine.timing_info["total_search_time"], 2)
+        }
         
         # Output Data Structure
         output_data = {
@@ -535,15 +721,33 @@ def main():
                 "model": model_name,
                 "timestamp": timestamp_str
             },
+            "time_used": timing_data,
             "results": results
         }
         
         # Save to JSON
-        with open(filename, "w", encoding='utf-8') as f:
+        with open(os.path.join(SAVE_PATH, filename), "w", encoding='utf-8') as f:
             json.dump(output_data, f, indent=4, ensure_ascii=False)
         
         print(f"\n{'='*60}")
         print(f"[검색 완료] 결과가 {filename}에 저장되었습니다.")
+        print(f"{'='*60}")
+        print(f"\n📊 [전체 실행 시간 분석]")
+        print(f"{'='*60}")
+        print(f"  ⏱️  총 실행 시간: {total_elapsed_time:.2f}초")
+        print(f"\n  🔧 초기화 단계:")
+        print(f"     - ModelManager 초기화: {model_manager.init_time:.2f}초")
+        print(f"       ├─ CLIP 로드: {model_manager.clip_load_time:.2f}초")
+        print(f"       └─ BLIP-2 로드: {model_manager.blip_load_time:.2f}초")
+        print(f"     - VideoProcessor 초기화: {video_processor.init_time:.2f}초")
+        print(f"     - 전체 초기화: {total_init_time:.2f}초")
+        print(f"\n  🔍 검색 단계:")
+        print(f"     - API 호출 (쿼리 분석): {engine.timing_info['api_call_time']:.2f}초")
+        print(f"     - 프레임 추출: {engine.timing_info['frame_extraction_time']:.2f}초")
+        print(f"     - CLIP 추론: {engine.timing_info['clip_inference_time']:.2f}초")
+        if USE_BLIP:
+            print(f"     - BLIP-2 추론: {engine.timing_info['blip_inference_time']:.2f}초")
+        print(f"     - 전체 검색: {engine.timing_info['total_search_time']:.2f}초")
         print(f"{'='*60}\n")
 
 if __name__ == "__main__":
