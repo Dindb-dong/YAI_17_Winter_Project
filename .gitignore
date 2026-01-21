@@ -3,3 +3,4 @@
 # 끝이 _test.png인 파일 모두 무시
 *_test.png
 .env
+.DS_Store
