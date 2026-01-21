@@ -5,7 +5,6 @@
 # print("필요한 패키지 설치가 끝났습니다.")
 
 import os
-from decord import VideoReader, cpu, gpu
 import torch
 import torchvision.io as io
 import torchvision.transforms.functional as F
@@ -88,7 +87,8 @@ class ModelManager:
                 "Salesforce/blip2-opt-2.7b",
                 use_fast=True)
             self.blip_model = Blip2ForConditionalGeneration.from_pretrained(
-                "Salesforce/blip2-opt-2.7b", dtype=torch.float16
+                "Salesforce/blip2-opt-2.7b", dtype=torch.float16, 
+                device_map={"": self.device} # 현재 지정된 GPU 장치에만 할당
             ).to(self.device)
             self.blip_model.eval()
             blip_time = time.time() - blip_start
@@ -215,6 +215,9 @@ class VideoProcessor:
         """
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
+            
+    def get_timestamp_str(self, seconds):
+        return str(datetime.timedelta(seconds=int(seconds)))
 
 
 # ## 5. Real-time Visualization
@@ -355,8 +358,6 @@ class RealTimeVisualizer:
         plt.close(self.fig)
 
         return self.save_filename
-
-print("✅ RealTimeVisualizer 클래스 정의 완료!")
 
 
 # ## 6. Adaptive Search Engine (핵심 로직)
