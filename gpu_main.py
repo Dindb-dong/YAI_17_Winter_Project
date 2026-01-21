@@ -904,14 +904,14 @@ class AdaptiveSearchEngine:
 # # ==========================================
 # # 모델 초기화 (이 셀은 런타임 시작 시 1번만 실행!)
 # # ==========================================
-# print("🔄 Blip2 모델 초기화 중...")
+# print("🔄 모델 초기화 확인 중...")
 
 # # Configuration
 # USE_BLIP = True  # BLIP-2 사용 여부 (메모리 주의)
 
 # # Initialize (전역 변수로 저장)
 # # 이미 초기화되었는지 확인
-# if 'model_manager' not in globals() or model_manager is None:
+# if 'model_manager' not in globals():
 #     print("🔄 ModelManager 초기화 중...")
 #     init_start_time = time.time()
 #     model_manager = ModelManager(use_blip=USE_BLIP)
@@ -964,6 +964,9 @@ def collect_timing_data(total_elapsed_time, total_init_time, model_manager, vide
 # 5. Main Execution
 # ==========================================
 def main():
+    # 전역 변수 선언 (함수 안에서 전역 변수를 사용/수정하기 위해 필요)
+    global model_manager, video_processor
+    
     # 전체 실행 시간 측정 시작
     program_start_time = time.time()
 
@@ -995,6 +998,13 @@ def main():
     init_start_time = time.time()
     # Initialize (전역 변수로 저장)
     # 이미 초기화되었는지 확인
+    
+    # main() 함수 안 (1001줄 앞에 추가)
+    print(f"[DEBUG] 'model_manager' in globals(): {'model_manager' in globals()}")
+    if 'model_manager' in globals():
+        print(f"[DEBUG] model_manager is None: {model_manager is None}")
+        print(f"[DEBUG] model_manager 값: {model_manager}")
+
     if 'model_manager' not in globals() or model_manager is None:
         print("🔄 ModelManager 초기화 중...")
         init_start_time = time.time()
