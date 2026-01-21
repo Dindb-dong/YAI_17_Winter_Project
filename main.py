@@ -857,8 +857,8 @@ def main():
                     model_name = "CB" if USE_BLIP else "Clip"
                     timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
                     # 유의미한 결과 나왔으면 _test.json 대신 .json 확장자 사용
-                    filename = f"{model_name}_{p}, {q}, {k}, {USE_BLIP}, {WEIGHT_CLIP if USE_BLIP else ""}, {WEIGHT_SEMANTIC if USE_BLIP else ""}_{timestamp_str}_test.json"
-                    filename_base = f"{model_name}_{p}, {q}, {k}, {USE_BLIP}, {WEIGHT_CLIP if USE_BLIP else ""}, {WEIGHT_SEMANTIC if USE_BLIP else ""}_{timestamp_str}_test"
+                    filename = f"{model_name}_{p}, {q}, {k}, {USE_BLIP}, {WEIGHT_CLIP if USE_BLIP else ''}, {WEIGHT_SEMANTIC if USE_BLIP else ''}_{timestamp_str}_test.json"
+                    filename_base = f"{model_name}_{p}, {q}, {k}, {USE_BLIP}, {WEIGHT_CLIP if USE_BLIP else ''}, {WEIGHT_SEMANTIC if USE_BLIP else ''}_{timestamp_str}_test"
                     
                     # 시각화 저장
                     if visualizer:
@@ -936,8 +936,8 @@ def main():
         
         model_name = "CB" if USE_BLIP else "Clip"
         timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{model_name}_{p_list[0]}, {q_list[0]}, {k_list[0]}, {USE_BLIP}, {WEIGHT_CLIP if USE_BLIP else ""}, {WEIGHT_SEMANTIC if USE_BLIP else ""}_{timestamp_str}_test.json"
-        filename_base = f"{model_name}_{p_list[0]}, {q_list[0]}, {k_list[0]}, {USE_BLIP}, {WEIGHT_CLIP if USE_BLIP else ""}, {WEIGHT_SEMANTIC if USE_BLIP else ""}_{timestamp_str}_test"
+        filename = f"{model_name}_{p_list[0]}, {q_list[0]}, {k_list[0]}, {USE_BLIP}, {WEIGHT_CLIP if USE_BLIP else ''}, {WEIGHT_SEMANTIC if USE_BLIP else ''}_{timestamp_str}_test.json"
+        filename_base = f"{model_name}_{p_list[0]}, {q_list[0]}, {k_list[0]}, {USE_BLIP}, {WEIGHT_CLIP if USE_BLIP else ''}, {WEIGHT_SEMANTIC if USE_BLIP else ''}_{timestamp_str}_test"
         
         # 시각화 저장
         if visualizer:
