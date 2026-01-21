@@ -1,4 +1,4 @@
-# pip install torch transformers opencv-python pillow numpy google-genai openai python-dotenv
+# pip install torch transformers opencv-python pillow numpy google-genai python-dotenv matplotlib
 # 혹시 파이토치 보안 관련 에러 뜨면... 이거 해주면 됨 
 # pip install --upgrade torch torchvision torchaudio
 import os
@@ -16,6 +16,9 @@ import re
 from dotenv import load_dotenv
 import time
 import random
+import matplotlib.pyplot as plt
+import matplotlib.animation as animation
+from matplotlib.patches import Circle
 
 # ==========================================
 # Gemini API 설정 (AdaptiveSearchEngine 내부 혹은 외부에 선언)
@@ -179,17 +182,39 @@ class AdaptiveSearchEngine:
             "total_search_time": 0.0
         }
 
-    def _call_gemini_with_retry(self, prompt: str, max_retries: int = 5) -> str:
+    def _call_gemini_with_retry(self, prompt: str, max_retries: int = 3, timeout: int = 20) -> str:
         """
-        Exponential Backoff과 Jitter를 사용한 재시도 로직
+        Exponential Backoff과 Jitter를 사용한 재시도 로직 (Timeout 적용)
         
         Args:
             prompt: Gemini API에 전달할 프롬프트
             max_retries: 최대 재시도 횟수
+            timeout: 각 요청의 최대 대기 시간 (초)
             
         Returns:
             API 응답 텍스트
         """
+        import signal
+        from contextlib import contextmanager
+        
+        @contextmanager
+        def time_limit(seconds):
+            """타임아웃 컨텍스트 매니저"""
+            def signal_handler(signum, frame):
+                raise TimeoutError(f"API 호출이 {seconds}초를 초과했습니다.")
+            
+            # macOS/Linux에서만 signal 사용 가능
+            if hasattr(signal, 'SIGALRM'):
+                signal.signal(signal.SIGALRM, signal_handler)
+                signal.alarm(seconds)
+                try:
+                    yield
+                finally:
+                    signal.alarm(0)
+            else:
+                # Windows에서는 단순 timeout
+                yield
+        
         # 시도할 모델 리스트 (우선순위 순)
         models = [
             'models/gemini-2.0-flash-lite',
@@ -206,18 +231,34 @@ class AdaptiveSearchEngine:
                         time.sleep(jitter)
                     
                     if attempt == 0 and model_idx == 0:
-                        print(f"  [API] {model} 호출 중...")
-                        print("429 Rate Limit 발생 시 최대 1분동안 더 시도합니다.")
+                        print(f"  [API] {model} 호출 중... (Timeout: {timeout}초)")
                     else:
-                        print(f"  [API] 재시도 {attempt + 1}/{max_retries} (모델: {model})...")
+                        print(f"  [API] 재시도 {attempt + 1}/{max_retries} (모델: {model}, Timeout: {timeout}초)...")
                     
-                    # API 호출
-                    response = client.models.generate_content(
-                        model=model,
-                        contents=prompt
-                    )
+                    # API 호출 (Timeout 적용)
+                    start_time = time.time()
+                    try:
+                        if hasattr(signal, 'SIGALRM'):
+                            with time_limit(timeout):
+                                response = client.models.generate_content(
+                                    model=model,
+                                    contents=prompt
+                                )
+                        else:
+                            # Windows: 단순 호출
+                            response = client.models.generate_content(
+                                model=model,
+                                contents=prompt
+                            )
+                            elapsed = time.time() - start_time
+                            if elapsed > timeout:
+                                raise TimeoutError(f"API 호출이 {timeout}초를 초과했습니다.")
+                    except TimeoutError as e:
+                        print(f"  [API] ⏱️ Timeout ({timeout}초 초과). 다음 모델로 전환...")
+                        break  # 다음 모델로
                     
-                    print(f"  [API] ✓ 성공!")
+                    elapsed = time.time() - start_time
+                    print(f"  [API] ✓ 성공! (소요 시간: {elapsed:.2f}초)")
                     return response.text.strip()
                     
                 except Exception as e:
@@ -225,28 +266,20 @@ class AdaptiveSearchEngine:
                     
                     # 429 Rate Limit 에러 처리
                     if "429" in error_str or "RESOURCE_EXHAUSTED" in error_str:
-                        # Exponential Backoff: 2^attempt 초 (최대 32초)
-                        wait_time = min(2 ** attempt, 32)
-                        # Jitter 추가: ±25% 랜덤 변동
-                        wait_time = wait_time * (1 + random.uniform(-0.25, 0.25))
-                        
-                        print(f"  [API] ⚠ Rate Limit 도달. {wait_time:.1f}초 대기 후 재시도...")
-                        time.sleep(wait_time)
-                        
-                        # 마지막 시도가 아니면 계속
+                        print(f"  [API] ⚠ Rate Limit 도달. 다음 모델로 즉시 전환...")
+                        break  # 대기하지 않고 바로 다음 모델로
+                    
+                    # 기타 에러
+                    else:
+                        print(f"  [API] ✗ 에러 발생: {error_str}")
                         if attempt < max_retries - 1:
                             continue
                         else:
-                            # 이 모델로 마지막 시도 실패 시 다음 모델로
                             if model_idx < len(models) - 1:
-                                print(f"  [API] ✗ {model} 실패. 다음 모델로 전환...")
+                                print(f"  [API] 다음 모델로 전환...")
                                 break
                             else:
                                 raise Exception(f"모든 모델 시도 실패: {error_str}")
-                    
-                    # 기타 에러는 즉시 발생
-                    else:
-                        raise e
         
         raise Exception("Gemini API 호출 실패: 모든 재시도 소진")
 
@@ -424,12 +457,16 @@ class AdaptiveSearchEngine:
         # 0~100 사이로 클리핑
         return float(np.clip(normalized, 0, 100))
 
-    def search(self, original_query, sub_queries, p_sec, q_frames, k_top, weight_clip = 0.7, weight_semantic = 0.3):
+    def search(self, original_query, sub_queries, p_sec, q_frames, k_top, weight_clip = 0.7, weight_semantic = 0.3, enable_visualization=True, save_path="results"):
         """
         Adaptive Search Engine 실행 메인 로직
         - 1. CLIP 기반 1차 검색 (Coarse-grained Search)
         - 2. BLIP-2 기반 2차 보정 (Fine-grained Refinement)
         - 3. 최종 점수 산출 및 정렬
+        
+        Args:
+            enable_visualization: 실시간 시각화 활성화 여부
+            save_path: 시각화 이미지 저장 경로
         """
         search_start_time = time.time()
         
@@ -444,8 +481,20 @@ class AdaptiveSearchEngine:
         step_size = p_sec  # 윈도우가 겹치지 않도록 수정
         current_time = 0.0
         
-        # 전체 윈도우 개수 계산
-        total_windows = int((self.vp.duration - p_sec) / step_size) + 1
+        # 전체 윈도우 개수 계산 (정확한 계산)
+        total_windows = int(np.ceil(self.vp.duration / step_size))
+        
+        # 실시간 시각화 초기화
+        visualizer = None
+        if enable_visualization:
+            try:
+                visualizer = RealTimeVisualizer(self.vp.duration, k_top, save_path)
+                print(f"\n{'='*60}")
+                print(f"[📊 실시간 시각화 활성화] 진행 상황을 실시간으로 그래프에 표시합니다!")
+                print(f"{'='*60}\n")
+            except Exception as e:
+                print(f"시각화 초기화 실패: {e}. 시각화 없이 계속 진행합니다.")
+                visualizer = None
         
         print(f"\n{'='*60}")
         print(f"[검색 시작] 총 {total_windows}개 윈도우 처리 예정 (윈도우 크기: {p_sec}초, 프레임 샘플: {q_frames}개)")
@@ -455,9 +504,9 @@ class AdaptiveSearchEngine:
         window_idx = 0
         current_top_window = None
         
-        while current_time + p_sec <= self.vp.duration:
+        while current_time < self.vp.duration:
             window_idx += 1
-            end_time = current_time + p_sec
+            end_time = min(current_time + p_sec, self.vp.duration)
             
             print(f"[Window {window_idx}/{total_windows}] 처리 중: {self.vp.get_timestamp_str(current_time)} - {self.vp.get_timestamp_str(end_time)}")
             
@@ -508,6 +557,17 @@ class AdaptiveSearchEngine:
                 print(f"  ⭐ 새로운 Top 윈도우 발견! ({current_top_window['timestamp']})\n")
             else:
                 print(f"  [현재 Top] {current_top_window['timestamp']} (점수: {current_top_window['clip_score_norm']:.4f})\n")
+            
+            # 실시간 시각화 업데이트
+            if visualizer:
+                try:
+                    visualizer.update({
+                        'start': current_time,
+                        'end': end_time,
+                        'clip_score_norm': clip_score_norm
+                    })
+                except Exception as e:
+                    print(f"  [시각화 경고] 업데이트 실패: {e}")
             
             current_time += step_size
 
@@ -563,11 +623,34 @@ class AdaptiveSearchEngine:
             print(f"{'='*60}")
             for idx, item in enumerate(top_k_candidates, 1):
                 print(f"{idx}. {item['timestamp']} - 최종 점수: {item.get('final_score', item['clip_score_norm']):.4f}")
+        else:
+            # BLIP-2 없을 때도 최종 순위 출력
+            print(f"\n{'='*60}")
+            print(f"[최종 순위]")
+            print(f"{'='*60}")
+            for idx, item in enumerate(top_k_candidates, 1):
+                print(f"{idx}. {item['timestamp']} - 점수: {item['clip_score_norm']:.4f}")
         
         print()
 
+        # 실시간 시각화 최종 업데이트 (BLIP-2 보정 여부와 관계없이 여기서 호출)
+        if visualizer:
+            try:
+                visualizer.finalize(top_k_candidates)
+                print(f"\n{'='*60}")
+                print(f"[📊 시각화 완료] 최종 Top-{k_top} 결과가 빨간색 별(★)로 표시되었습니다!")
+                print(f"{'='*60}\n")
+            except Exception as e:
+                print(f"[시각화 오류] 최종 업데이트 실패: {e}")
+                import traceback
+                traceback.print_exc()
+        
         # 결과 저장 전 이미지 객체 삭제 (메모리 확보)
         for item in top_k_candidates:
+            if 'mid_frame' in item: del item['mid_frame']
+        
+        # all_windows에서도 이미지 객체 삭제
+        for item in all_windows:
             if 'mid_frame' in item: del item['mid_frame']
         
         # 타이밍 정보 저장
@@ -577,19 +660,145 @@ class AdaptiveSearchEngine:
         self.timing_info["blip_inference_time"] = total_blip_inference_time
         self.timing_info["total_search_time"] = total_search_time
         
-        print(f"\n{'='*60}")
-        print(f"[성능 통계]")
-        print(f"  - 프레임 추출 총 시간: {total_frame_extraction_time:.2f}초")
-        print(f"  - CLIP 추론 총 시간: {total_clip_inference_time:.2f}초")
-        if self.mm.use_blip:
-            print(f"  - BLIP-2 추론 총 시간: {total_blip_inference_time:.2f}초")
-        print(f"  - 전체 검색 시간: {total_search_time:.2f}초")
-        print(f"{'='*60}\n")
-            
-        return top_k_candidates
+        # visualizer 객체를 반환 (main에서 저장)
+        return top_k_candidates, all_windows, visualizer
 
 # ==========================================
-# 4. Main Execution
+# 4. Real-time Visualization
+# ==========================================
+class RealTimeVisualizer:
+    def __init__(self, total_duration, k_top, save_path="results"):
+        """
+        실시간 시각화를 위한 클래스
+        
+        Args:
+            total_duration: 비디오 총 길이 (초)
+            k_top: Top-K 개수
+            save_path: 그래프 이미지 저장 경로
+        """
+        self.total_duration = total_duration
+        self.k_top = k_top
+        self.save_path = save_path
+        self.window_data = []
+        self.current_top_k = []
+        self.is_complete = False
+        self.save_filename = None
+        
+        # 그래프 설정
+        plt.ion()  # Interactive mode
+        self.fig, self.ax = plt.subplots(figsize=(14, 6))
+        self.fig.suptitle('Real-time Video Search Similarity Scores', fontsize=14, fontweight='bold')
+        
+    def update(self, window_info):
+        """
+        새로운 윈도우 정보로 그래프 업데이트
+        
+        Args:
+            window_info: {'start': float, 'end': float, 'clip_score_norm': float, 'is_top_k': bool}
+        """
+        self.window_data.append(window_info)
+        
+        # 현재까지의 Top-K 계산
+        sorted_windows = sorted(self.window_data, key=lambda x: x['clip_score_norm'], reverse=True)
+        self.current_top_k = sorted_windows[:self.k_top]
+        
+        self._draw()
+        
+    def finalize(self, final_top_k):
+        """
+        검색 완료 후 최종 Top-K 표시
+        
+        Args:
+            final_top_k: 최종 Top-K 윈도우 리스트
+        """
+        self.is_complete = True
+        self.final_top_k = final_top_k
+        self._draw()
+        
+    def _draw(self):
+        """그래프 그리기"""
+        self.ax.clear()
+        
+        if not self.window_data:
+            return
+        
+        # 시간축과 점수 데이터 준비
+        times = [(w['start'] + w['end']) / 2 for w in self.window_data]
+        scores = [w['clip_score_norm'] for w in self.window_data]
+        
+        # 1. 기본 점수 선 그래프 (회색)
+        self.ax.plot(times, scores, color='#CCCCCC', linewidth=1, alpha=0.6, zorder=1)
+        
+        # 2. 모든 윈도우 점 (작은 파란색)
+        self.ax.scatter(times, scores, color='#4A90E2', s=30, alpha=0.5, zorder=2)
+        
+        # 3. 현재 Top-K 후보 (노란색 큰 점)
+        if not self.is_complete:
+            top_k_times = [(w['start'] + w['end']) / 2 for w in self.current_top_k]
+            top_k_scores = [w['clip_score_norm'] for w in self.current_top_k]
+            self.ax.scatter(top_k_times, top_k_scores, color='#FFD700', s=200, 
+                          edgecolors='#FFA500', linewidths=2, zorder=4, 
+                          label=f'Current Top-{self.k_top}', marker='o', alpha=0.9)
+            
+            # 반짝이는 효과를 위한 외곽선
+            for t, s in zip(top_k_times, top_k_scores):
+                circle = Circle((t, s), radius=0.3, color='#FFD700', alpha=0.3, zorder=3)
+                self.ax.add_patch(circle)
+        
+        # 4. 최종 Top-K (빨간색 큰 점)
+        if self.is_complete:
+            final_times = [(w['start'] + w['end']) / 2 for w in self.final_top_k]
+            final_scores = [w['clip_score_norm'] for w in self.final_top_k]
+            self.ax.scatter(final_times, final_scores, color='#E74C3C', s=250, 
+                          edgecolors='#C0392B', linewidths=3, zorder=5, 
+                          label=f'Final Top-{self.k_top}', marker='*', alpha=1.0)
+            
+            # 순위 표시
+            for idx, (t, s, w) in enumerate(zip(final_times, final_scores, self.final_top_k), 1):
+                self.ax.annotate(f'#{idx}', xy=(t, s), xytext=(5, 5), 
+                               textcoords='offset points', fontsize=10, 
+                               fontweight='bold', color='#E74C3C',
+                               bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor='#E74C3C', alpha=0.8))
+        
+        # 그래프 설정
+        self.ax.set_xlabel('Video Time (seconds)', fontsize=11, fontweight='bold')
+        self.ax.set_ylabel('Normalized Similarity Score', fontsize=11, fontweight='bold')
+        self.ax.set_xlim(0, self.total_duration)
+        self.ax.set_ylim(0, 105)
+        self.ax.grid(True, alpha=0.3, linestyle='--')
+        self.ax.legend(loc='upper right', fontsize=9)
+        
+        # 진행률 표시
+        if self.window_data:
+            progress = (self.window_data[-1]['end'] / self.total_duration) * 100
+            status = "COMPLETE ✓" if self.is_complete else f"Processing... {progress:.1f}%"
+            self.ax.text(0.02, 0.98, status, transform=self.ax.transAxes, 
+                       fontsize=11, fontweight='bold', verticalalignment='top',
+                       bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
+        
+        plt.tight_layout()
+        plt.pause(0.01)
+        
+    def save_and_close(self, filename_base):
+        """그래프를 이미지로 저장하고 창 닫기"""
+        plt.ioff()
+        
+        # 파일명 생성
+        timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
+        self.save_filename = f"viz_{filename_base}.png"
+        save_path = os.path.join(self.save_path, self.save_filename)
+        
+        # 이미지로 저장
+        self.fig.savefig(save_path, dpi=150, bbox_inches='tight')
+        print(f"  [시각화] 그래프 저장 완료: {self.save_filename}")
+        
+        # 창 닫기
+        plt.close(self.fig)
+        
+        return self.save_filename
+
+# ==========================================
+# 5. Main Execution
 # ==========================================
 def main():
     # 전체 실행 시간 측정 시작
@@ -631,14 +840,15 @@ def main():
     print(f"[분할된 쿼리] {sub_queries}\n")
     
     # Experiment Loop
+    # 반복 실행 할 때
     if USE_LOOP:
         for p in p_list:
             for q in q_list:
                 for k in k_list:
                     print(f"\n--- Running Experiment: p={p}, q={q}, k={k} ---")
                     
-                    # Perform Search
-                    results = engine.search(QUERY, sub_queries, p, q, k, WEIGHT_CLIP, WEIGHT_SEMANTIC)
+                    # Perform Search (실시간 시각화 활성화)
+                    results, all_windows_data, visualizer = engine.search(QUERY, sub_queries, p, q, k, WEIGHT_CLIP, WEIGHT_SEMANTIC, enable_visualization=True, save_path=SAVE_PATH)
                     
                     # 전체 실행 시간 계산
                     total_elapsed_time = time.time() - program_start_time
@@ -646,7 +856,19 @@ def main():
                     # Construct Filename
                     model_name = "CB" if USE_BLIP else "Clip"
                     timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-                    filename = f"{model_name}_{p}, {q}, {k}_{USE_BLIP}_{timestamp_str}_test.json"
+                    # 유의미한 결과 나왔으면 _test.json 대신 .json 확장자 사용
+                    filename = f"{model_name}_{p}, {q}, {k}, {USE_BLIP}, {WEIGHT_CLIP if USE_BLIP else ""}, {WEIGHT_SEMANTIC if USE_BLIP else ""}_{timestamp_str}_test.json"
+                    filename_base = f"{model_name}_{p}, {q}, {k}, {USE_BLIP}, {WEIGHT_CLIP if USE_BLIP else ""}, {WEIGHT_SEMANTIC if USE_BLIP else ""}_{timestamp_str}_test"
+                    
+                    # 시각화 저장
+                    if visualizer:
+                        try:
+                            viz_filename = visualizer.save_and_close(filename_base)
+                        except Exception as e:
+                            print(f"  [시각화] 저장 실패: {e}")
+                            viz_filename = None
+                    else:
+                        viz_filename = None
                     
                     # 타이밍 정보 수집
                     timing_data = {
@@ -670,7 +892,7 @@ def main():
                             "query": QUERY,
                             "sub_queries": sub_queries,
                             "split_reason": split_reason,
-                            "parameters": {"p": p, "q": q, "k": k},
+                            "parameters": {"p": p, "q": q, "k": k, "USE_BLIP": USE_BLIP, "WEIGHT_CLIP": WEIGHT_CLIP, "WEIGHT_SEMANTIC": WEIGHT_SEMANTIC},
                             "model": model_name,
                             "timestamp": timestamp_str
                         },
@@ -682,18 +904,50 @@ def main():
                     with open(os.path.join(SAVE_PATH, filename), "w", encoding='utf-8') as f:
                         json.dump(output_data, f, indent=4, ensure_ascii=False)
                     
+                    # 모든 윈도우의 상세 점수 저장
+                    whole_score_filename = f"whole_score_{filename}"
+                    whole_score_data = {
+                        "meta": {
+                            "video_path": VIDEO_PATH,
+                            "query": QUERY,
+                            "sub_queries": sub_queries,
+                            "parameters": {"p": p, "q": q, "k": k, "USE_BLIP": USE_BLIP, "WEIGHT_CLIP": WEIGHT_CLIP, "WEIGHT_SEMANTIC": WEIGHT_SEMANTIC},
+                            "total_windows": len(all_windows_data),
+                            "timestamp": timestamp_str
+                        },
+                        "all_windows": all_windows_data
+                    }
+                    with open(os.path.join(SAVE_PATH, whole_score_filename), "w", encoding='utf-8') as f:
+                        json.dump(whole_score_data, f, indent=4, ensure_ascii=False)
+                    
                     print(f"\n[저장 완료] {filename}")
+                    print(f"[상세 점수 저장 완료] {whole_score_filename}")
+                    print(f"  -> 총 {len(all_windows_data)}개 윈도우의 상세 점수 저장됨")
+                    if viz_filename:
+                        print(f"[시각화 저장 완료] {viz_filename}")
                     print(f"[총 실행 시간] {total_elapsed_time:.2f}초\n")
                     
+    # 반복 실행 아닐 때
     else:
-        results = engine.search(QUERY, sub_queries, p_list[0], q_list[0], k_list[0], WEIGHT_CLIP, WEIGHT_SEMANTIC)
+        results, all_windows_data, visualizer = engine.search(QUERY, sub_queries, p_list[0], q_list[0], k_list[0], WEIGHT_CLIP, WEIGHT_SEMANTIC, enable_visualization=True, save_path=SAVE_PATH)
         
         # 전체 실행 시간 계산
         total_elapsed_time = time.time() - program_start_time
         
         model_name = "CB" if USE_BLIP else "Clip"
         timestamp_str = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"{model_name}_{p_list[0]}, {q_list[0]}, {k_list[0]}_{USE_BLIP}_{timestamp_str}_test.json"
+        filename = f"{model_name}_{p_list[0]}, {q_list[0]}, {k_list[0]}, {USE_BLIP}, {WEIGHT_CLIP if USE_BLIP else ""}, {WEIGHT_SEMANTIC if USE_BLIP else ""}_{timestamp_str}_test.json"
+        filename_base = f"{model_name}_{p_list[0]}, {q_list[0]}, {k_list[0]}, {USE_BLIP}, {WEIGHT_CLIP if USE_BLIP else ""}, {WEIGHT_SEMANTIC if USE_BLIP else ""}_{timestamp_str}_test"
+        
+        # 시각화 저장
+        if visualizer:
+            try:
+                viz_filename = visualizer.save_and_close(filename_base)
+            except Exception as e:
+                print(f"  [시각화] 저장 실패: {e}")
+                viz_filename = None
+        else:
+            viz_filename = None
         
         # 타이밍 정보 수집
         timing_data = {
@@ -717,7 +971,7 @@ def main():
                 "query": QUERY,
                 "sub_queries": sub_queries,
                 "split_reason": split_reason,
-                "parameters": {"p": p_list[0], "q": q_list[0], "k": k_list[0]},
+                "parameters": {"p": p_list[0], "q": q_list[0], "k": k_list[0], "USE_BLIP": USE_BLIP, "WEIGHT_CLIP": WEIGHT_CLIP, "WEIGHT_SEMANTIC": WEIGHT_SEMANTIC},
                 "model": model_name,
                 "timestamp": timestamp_str
             },
@@ -729,8 +983,28 @@ def main():
         with open(os.path.join(SAVE_PATH, filename), "w", encoding='utf-8') as f:
             json.dump(output_data, f, indent=4, ensure_ascii=False)
         
+        # 모든 윈도우의 상세 점수 저장
+        whole_score_filename = f"whole_score_{filename}"
+        whole_score_data = {
+            "meta": {
+                "video_path": VIDEO_PATH,
+                "query": QUERY,
+                "sub_queries": sub_queries,
+                "parameters": {"p": p_list[0], "q": q_list[0], "k": k_list[0], "USE_BLIP": USE_BLIP, "WEIGHT_CLIP": WEIGHT_CLIP, "WEIGHT_SEMANTIC": WEIGHT_SEMANTIC},
+                "total_windows": len(all_windows_data),
+                "timestamp": timestamp_str
+            },
+            "all_windows": all_windows_data
+        }
+        with open(os.path.join(SAVE_PATH, whole_score_filename), "w", encoding='utf-8') as f:
+            json.dump(whole_score_data, f, indent=4, ensure_ascii=False)
+        
         print(f"\n{'='*60}")
         print(f"[검색 완료] 결과가 {filename}에 저장되었습니다.")
+        print(f"[상세 점수 저장 완료] {whole_score_filename}")
+        print(f"  -> 총 {len(all_windows_data)}개 윈도우의 상세 점수 저장됨")
+        if viz_filename:
+            print(f"[시각화 저장 완료] {viz_filename}")
         print(f"{'='*60}")
         print(f"\n📊 [전체 실행 시간 분석]")
         print(f"{'='*60}")

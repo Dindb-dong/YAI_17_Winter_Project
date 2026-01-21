@@ -1,3 +1,5 @@
 # 끝이 _test.json인 파일 모두 무시
 *_test.json
+# 끝이 _test.png인 파일 모두 무시
+*_test.png
 .env
