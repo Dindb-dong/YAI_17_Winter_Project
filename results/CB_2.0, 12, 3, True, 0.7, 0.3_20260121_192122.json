@@ -1,0 +1,116 @@
+{
+    "meta": {
+        "video_path": "/kaggle/input/yai-17-w/sample_video.mp4",
+        "query": "바닥에 떨어진 신용카드",
+        "sub_queries": [
+            "Credit card lying on the floor"
+        ],
+        "split_reason": "[Gemini API] 단일 상태를 묘사하는 쿼리로 분할하지 않았습니다.",
+        "parameters": {
+            "p": 2.0,
+            "q": 12,
+            "k": 3,
+            "USE_BLIP": true,
+            "WEIGHT_CLIP": 0.7,
+            "WEIGHT_SEMANTIC": 0.3
+        },
+        "model": "CB",
+        "timestamp": "20260121_192122"
+    },
+    "time_used": {
+        "total_time": 16.14,
+        "init_time": 3.37,
+        "model_manager_init_time": 70.79,
+        "clip_load_time": 5.68,
+        "blip_load_time": 65.11,
+        "video_processor_init_time": 3.37,
+        "api_call_time": 0.96,
+        "frame_extraction_time": 5.75,
+        "clip_inference_time": 3.05,
+        "blip_inference_time": 1.49,
+        "total_search_time": 11.8
+    },
+    "results": [
+        {
+            "start": 14.0,
+            "end": 16.0,
+            "timestamp": "0:00:14 - 0:00:16",
+            "raw_score": 0.2608250677585602,
+            "clip_score_norm": 24.33002710342407,
+            "frame_scores": {
+                "query_0": [
+                    0.2036145180463791,
+                    0.2036145180463791,
+                    0.2036145180463791,
+                    0.2036145180463791,
+                    0.28943032026290894,
+                    0.28943032026290894,
+                    0.28943032026290894,
+                    0.28943032026290894,
+                    0.28943032026290894,
+                    0.28943032026290894,
+                    0.28943032026290894,
+                    0.28943032026290894
+                ]
+            },
+            "temp_img_path": "results/temp_thumbs/thumb_w8_14.0.jpg",
+            "blip_caption": "a bathroom with a toilet and a shower",
+            "semantic_consistency": 0.6138569116592407,
+            "final_score": 17.21517604589462
+        },
+        {
+            "start": 52.0,
+            "end": 54.0,
+            "timestamp": "0:00:52 - 0:00:54",
+            "raw_score": 0.24573589861392975,
+            "clip_score_norm": 18.294359445571896,
+            "frame_scores": {
+                "query_0": [
+                    0.24573591351509094,
+                    0.24573591351509094,
+                    0.24573591351509094,
+                    0.24573591351509094,
+                    0.24573591351509094,
+                    0.24573591351509094,
+                    0.24573591351509094,
+                    0.24573591351509094,
+                    0.24573591351509094,
+                    0.24573591351509094,
+                    0.24573591351509094,
+                    0.24573591351509094
+                ]
+            },
+            "temp_img_path": "results/temp_thumbs/thumb_w27_52.0.jpg",
+            "blip_caption": "a door with a keypad and a door handle",
+            "semantic_consistency": 0.5489879846572876,
+            "final_score": 12.970748007297512
+        },
+        {
+            "start": 54.0,
+            "end": 56.0,
+            "timestamp": "0:00:54 - 0:00:56",
+            "raw_score": 0.24573589861392975,
+            "clip_score_norm": 18.294359445571896,
+            "frame_scores": {
+                "query_0": [
+                    0.24573591351509094,
+                    0.24573591351509094,
+                    0.24573591351509094,
+                    0.24573591351509094,
+                    0.24573591351509094,
+                    0.24573591351509094,
+                    0.24573591351509094,
+                    0.24573591351509094,
+                    0.24573591351509094,
+                    0.24573591351509094,
+                    0.24573591351509094,
+                    0.24573591351509094
+                ]
+            },
+            "temp_img_path": "results/temp_thumbs/thumb_w28_54.0.jpg",
+            "blip_caption": "a door with a keypad and a door handle",
+            "semantic_consistency": 0.5489879846572876,
+            "final_score": 12.970748007297512
+        }
+    ]
+}

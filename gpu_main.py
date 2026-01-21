@@ -1,7 +1,7 @@
 # %pip install transformers opencv-python pillow numpy google-genai python-dotenv matplotlib
 # %pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
 # %pip install triton
-# %pip install decord
+# %pip install av --upgrade
 # print("필요한 패키지 설치가 끝났습니다.")
 
 import os
