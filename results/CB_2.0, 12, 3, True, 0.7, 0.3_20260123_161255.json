@@ -1,0 +1,171 @@
+{
+    "meta": {
+        "video_path": "/kaggle/input/yai-17-w/sample_video.mp4",
+        "query": "바닥에 떨어지는 신용카드, 그것을 보고 난감한 표정을 짓는 남자",
+        "sub_queries": [
+            "Credit card falling to the floor",
+            "Man with a bewildered expression looking at the fallen credit card"
+        ],
+        "split_reason": "[Gemini API] 시간 순서를 나타내는 '그것을 보고'를 기준으로 두 개의 연속 동작으로 분할했습니다.",
+        "parameters": {
+            "p": 2.0,
+            "q": 12,
+            "k": 3,
+            "USE_BLIP": true,
+            "WEIGHT_CLIP": 0.7,
+            "WEIGHT_SEMANTIC": 0.3
+        },
+        "model": "CB",
+        "timestamp": "20260123_161255"
+    },
+    "time_used": {
+        "total_time": 34.02,
+        "init_time": 0.0,
+        "model_manager_init_time": 58.85,
+        "clip_load_time": 1.9,
+        "blip_load_time": 56.94,
+        "video_processor_init_time": 3.29,
+        "api_call_time": 1.39,
+        "frame_extraction_time": 11.57,
+        "clip_inference_time": 4.97,
+        "blip_inference_time": 2.49,
+        "total_search_time": 32.62
+    },
+    "results": [
+        {
+            "start": 15.0,
+            "end": 17.0,
+            "timestamp": "0:00:15 - 0:00:17",
+            "max_score": 0.27547889947891235,
+            "best_frame_idx": 0,
+            "frame_scores": {
+                "query_0": [
+                    0.29432061314582825,
+                    0.29432061314582825,
+                    0.29432061314582825,
+                    0.29432061314582825,
+                    0.29432061314582825,
+                    0.29432061314582825,
+                    0.29432061314582825,
+                    0.29432061314582825,
+                    0.29432061314582825,
+                    0.22632965445518494,
+                    0.22632965445518494,
+                    0.22632965445518494
+                ],
+                "query_1": [
+                    0.22462494671344757,
+                    0.22462494671344757,
+                    0.22462494671344757,
+                    0.22462494671344757,
+                    0.22462494671344757,
+                    0.22462494671344757,
+                    0.22462494671344757,
+                    0.22462494671344757,
+                    0.22462494671344757,
+                    0.2566371560096741,
+                    0.2566371560096741,
+                    0.2566371560096741
+                ],
+                "best_split_index": 9
+            },
+            "temp_img_path": "results/temp_thumbs/thumb_w16_15.0.jpg",
+            "is_sequential": true,
+            "blip_caption": "[전반부] a close up of a bathroom floor with a toilet | [후반부] a young man is looking at something",
+            "semantic_consistency": 0.7696678340435028,
+            "semantic_front": 0.7297937273979187,
+            "semantic_back": 0.8095419406890869,
+            "final_score": 0.42373557984828947
+        },
+        {
+            "start": 16.0,
+            "end": 18.0,
+            "timestamp": "0:00:16 - 0:00:18",
+            "max_score": 0.27547889947891235,
+            "best_frame_idx": 0,
+            "frame_scores": {
+                "query_0": [
+                    0.29432061314582825,
+                    0.29432061314582825,
+                    0.29432061314582825,
+                    0.29432061314582825,
+                    0.22632965445518494,
+                    0.22632965445518494,
+                    0.22632965445518494,
+                    0.22632965445518494,
+                    0.22632965445518494,
+                    0.22632965445518494,
+                    0.22632965445518494,
+                    0.22632965445518494
+                ],
+                "query_1": [
+                    0.22462494671344757,
+                    0.22462494671344757,
+                    0.22462494671344757,
+                    0.22462494671344757,
+                    0.2566371560096741,
+                    0.2566371560096741,
+                    0.2566371560096741,
+                    0.2566371560096741,
+                    0.2566371560096741,
+                    0.2566371560096741,
+                    0.2566371560096741,
+                    0.2566371560096741
+                ],
+                "best_split_index": 4
+            },
+            "temp_img_path": "results/temp_thumbs/thumb_w17_16.0.jpg",
+            "is_sequential": true,
+            "blip_caption": "[전반부] a close up of a bathroom floor with a toilet | [후반부] a young man is looking at something",
+            "semantic_consistency": 0.7696678340435028,
+            "semantic_front": 0.7297937273979187,
+            "semantic_back": 0.8095419406890869,
+            "final_score": 0.42373557984828947
+        },
+        {
+            "start": 5.0,
+            "end": 7.0,
+            "timestamp": "0:00:05 - 0:00:07",
+            "max_score": 0.2476361095905304,
+            "best_frame_idx": 0,
+            "frame_scores": {
+                "query_0": [
+                    0.25825485587120056,
+                    0.25825485587120056,
+                    0.25825485587120056,
+                    0.25825485587120056,
+                    0.25825485587120056,
+                    0.25825485587120056,
+                    0.25825485587120056,
+                    0.25825485587120056,
+                    0.25825485587120056,
+                    0.24279960989952087,
+                    0.24279960989952087,
+                    0.24279960989952087
+                ],
+                "query_1": [
+                    0.23276783525943756,
+                    0.23276783525943756,
+                    0.23276783525943756,
+                    0.23276783525943756,
+                    0.23276783525943756,
+                    0.23276783525943756,
+                    0.23276783525943756,
+                    0.23276783525943756,
+                    0.23276783525943756,
+                    0.23701734840869904,
+                    0.23701734840869904,
+                    0.23701734840869904
+                ],
+                "best_split_index": 9
+            },
+            "temp_img_path": "results/temp_thumbs/thumb_w6_5.0.jpg",
+            "is_sequential": true,
+            "blip_caption": "[전반부] a person in a black jacket walking up stairs | [후반부] a man wearing a vest and hoodie in a room",
+            "semantic_consistency": 0.5900611877441406,
+            "semantic_front": 0.6565078496932983,
+            "semantic_back": 0.5236145257949829,
+            "final_score": 0.35036363303661344
+        }
+    ]
+}
