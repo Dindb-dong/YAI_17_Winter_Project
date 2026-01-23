@@ -42,6 +42,14 @@ import shutil
 # 좌측 패널 열쇠 모양 클릭 -> 새 보안 비밀 추가 -> 이름: GEMINI_API_KEY, 값: 실제 API 키값 따옴표 없이 그대로.
 from google.colab import userdata  # type: ignore
 GEMINI_API_KEY = userdata.get('GEMINI_API_KEY')
+
+# 캐글 
+# from kaggle_secrets import UserSecretsClient
+
+# # API 키 가져오기
+# user_secrets = UserSecretsClient()
+# GEMINI_API_KEY = user_secrets.get_secret("GEMINI_API_KEY")
+
 client = genai.Client(api_key=GEMINI_API_KEY, http_options=genai.types.HttpOptions(api_version="v1"))
 if client is not None:
     print("Gemini Client initialized successfully")
@@ -268,10 +276,60 @@ class RealTimeVisualizer:
         self.is_complete = False
         self.save_filename = None
 
+        # 환경 감지 (Colab/Kaggle vs 로컬)
+        self.is_notebook = self._is_notebook_environment()
+        
+        if self.is_notebook:
+            # Colab/Kaggle: IPython display 사용
+            try:
+                from IPython.display import display, clear_output
+                self.display = display
+                self.clear_output = clear_output
+                print("📊 [Notebook 환경] IPython display 모드로 시각화")
+            except ImportError:
+                print("⚠️ IPython을 찾을 수 없습니다. 시각화를 비활성화합니다.")
+                self.is_notebook = False
+        else:
+            # 로컬: Interactive mode
+            print("📊 [로컬 환경] Interactive 모드로 시각화")
+            plt.ion()
+
         # 그래프 설정
-        plt.ion()  # Interactive mode
         self.fig, self.ax = plt.subplots(figsize=(14, 6))
         self.fig.suptitle('Real-time Video Search Similarity Scores', fontsize=14, fontweight='bold')
+    
+    def _is_notebook_environment(self):
+        """
+        현재 환경이 Jupyter/Colab/Kaggle 노트북인지 확인
+        """
+        try:
+            # IPython 환경인지 확인
+            from IPython import get_ipython
+            ipython = get_ipython()
+            if ipython is None:
+                return False
+            
+            # 노트북 환경인지 확인
+            if 'IPKernelApp' in ipython.config:
+                return True
+            
+            # Colab 확인
+            try:
+                import google.colab
+                return True
+            except:
+                pass
+            
+            # Kaggle 확인
+            try:
+                import kaggle_secrets
+                return True
+            except:
+                pass
+            
+            return False
+        except:
+            return False
 
     def update(self, window_info):
         """
@@ -287,6 +345,11 @@ class RealTimeVisualizer:
         self.current_top_k = sorted_windows[:self.k_top]
 
         self._draw()
+        
+        # 노트북 환경에서는 명시적으로 display
+        if self.is_notebook:
+            self.clear_output(wait=True)
+            self.display(self.fig)
 
     def finalize(self, final_top_k):
         """
@@ -298,6 +361,11 @@ class RealTimeVisualizer:
         self.is_complete = True
         self.final_top_k = final_top_k
         self._draw()
+        
+        # 노트북 환경에서는 명시적으로 display
+        if self.is_notebook:
+            self.clear_output(wait=True)
+            self.display(self.fig)
 
     def _draw(self):
         """그래프 그리기"""
@@ -332,7 +400,8 @@ class RealTimeVisualizer:
         # 4. 최종 Top-K (빨간색 큰 점)
         if self.is_complete:
             final_times = [(w['start'] + w['end']) / 2 for w in self.final_top_k]
-            final_scores = [w['clip_score_norm'] for w in self.final_top_k]
+            # max_score 또는 clip_score_norm 키 사용 (하위 호환성)
+            final_scores = [w.get('max_score', w.get('clip_score_norm', 0)) for w in self.final_top_k]
             self.ax.scatter(final_times, final_scores, color='#E74C3C', s=250,
                           edgecolors='#C0392B', linewidths=3, zorder=5,
                           label=f'Final Top-{self.k_top}', marker='*', alpha=1.0)
@@ -346,9 +415,12 @@ class RealTimeVisualizer:
 
         # 그래프 설정
         self.ax.set_xlabel('Video Time (seconds)', fontsize=11, fontweight='bold')
-        self.ax.set_ylabel('Normalized Similarity Score', fontsize=11, fontweight='bold')
+        self.ax.set_ylabel('Maximum Similarity Score', fontsize=11, fontweight='bold')
         self.ax.set_xlim(0, self.total_duration)
-        self.ax.set_ylim(0, 105)
+        # y축 범위를 동적으로 설정 (0-1 범위 또는 데이터에 맞게)
+        if self.window_data:
+            max_score_in_data = max([w['clip_score_norm'] for w in self.window_data])
+            self.ax.set_ylim(0, min(1.1, max_score_in_data * 1.1))  # 약간 여유 추가
         self.ax.grid(True, alpha=0.3, linestyle='--')
         self.ax.legend(loc='upper right', fontsize=9)
 
@@ -361,11 +433,16 @@ class RealTimeVisualizer:
                        bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
 
         plt.tight_layout()
-        plt.pause(0.01)
+        
+        # 로컬 환경에서만 pause 사용
+        if not self.is_notebook:
+            plt.pause(0.01)
 
     def save_and_close(self, filename_base):
         """그래프를 이미지로 저장하고 창 닫기"""
-        plt.ioff()
+        # 로컬 환경에서만 interactive mode 종료
+        if not self.is_notebook:
+            plt.ioff()
 
         # 파일명 생성
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -649,9 +726,9 @@ class AdaptiveSearchEngine:
         best_split = -1
 
         # Linear Scan to find Change Point
-        # 최소 20% 지점부터 80% 지점 사이에서 분할 시도
-        start_idx = int(q_len * 0.2)
-        end_idx = int(q_len * 0.8)
+        # 최소 10% 지점부터 90% 지점 사이에서 분할 시도
+        start_idx = int(q_len * 0.1)
+        end_idx = int(q_len * 0.9)
 
         if len(sub_queries) == 2:
             score_A = scores_matrix[:, 0] # Similarity curve for Query A
@@ -686,7 +763,7 @@ class AdaptiveSearchEngine:
         # 0~100 사이로 클리핑
         return float(np.clip(normalized, 0, 100))
 
-    def search(self, original_query, sub_queries, p_sec, q_frames, k_top, weight_clip = 0.7, weight_semantic = 0.3, enable_visualization=True, save_path="results"):
+    def search(self, original_query, sub_queries, p_sec, q_frames, k_top, step_sec=1.0, weight_clip = 0.7, weight_semantic = 0.3, enable_visualization=True, save_path="results"):
         """
         Adaptive Search Engine 실행 메인 로직
         - 1. CLIP 기반 1차 검색 (Coarse-grained Search)
@@ -694,6 +771,14 @@ class AdaptiveSearchEngine:
         - 3. 최종 점수 산출 및 정렬
 
         Args:
+            original_query: 원본 쿼리
+            sub_queries: 분할된 쿼리 리스트
+            p_sec: 윈도우 크기 (초)
+            q_frames: 샘플링 프레임 수
+            k_top: Top-K 개수
+            step_sec: 윈도우 이동 간격 (초) - p_sec보다 작으면 윈도우가 겹침
+            weight_clip: CLIP 점수 가중치
+            weight_semantic: Semantic 점수 가중치
             enable_visualization: 실시간 시각화 활성화 여부
             save_path: 시각화 이미지 저장 경로
         """
@@ -707,11 +792,11 @@ class AdaptiveSearchEngine:
         is_sequential = len(sub_queries) > 1
 
         all_windows = []
-        step_size = p_sec  # 윈도우가 겹치지 않도록 수정
+        step_size = step_sec  # 윈도우 이동 간격 (사용자 정의 가능)
         current_time = 0.0
 
-        # 전체 윈도우 개수 계산 (정확한 계산)
-        total_windows = int(np.ceil(self.vp.duration / step_size))
+        # 전체 윈도우 개수 계산 (겹칠 수 있으므로 정확한 계산)
+        total_windows = int(np.ceil((self.vp.duration - p_sec) / step_size)) + 1
 
         # 실시간 시각화 초기화
         visualizer = None
@@ -721,6 +806,10 @@ class AdaptiveSearchEngine:
                 print(f"\n{'='*60}")
                 print(f"[📊 실시간 시각화 활성화] 진행 상황을 실시간으로 그래프에 표시합니다!")
                 print(f"{'='*60}\n")
+                
+                # 노트북 환경에서는 빈 그래프를 먼저 표시
+                if visualizer.is_notebook:
+                    visualizer.display(visualizer.fig)
             except Exception as e:
                 print(f"시각화 초기화 실패: {e}. 시각화 없이 계속 진행합니다.")
                 visualizer = None
@@ -756,16 +845,26 @@ class AdaptiveSearchEngine:
             # CLIP 추론 시간 측정
             clip_start = time.time()
             if is_sequential:
-                raw_score, scores_matrix, best_split = self.calculate_sequential_score(frames, sub_queries)
+                # 시퀀셜: calculate_sequential_score가 반환하는 max_score 사용
+                max_score, scores_matrix, best_split = self.calculate_sequential_score(frames, sub_queries)
                 # 각 프레임별 점수 저장 (시퀀셜의 경우 두 쿼리에 대한 점수)
                 frame_scores = {
                     f"query_{i}": scores_matrix[:, i].tolist()
                     for i in range(len(sub_queries))
                 }
                 frame_scores["best_split_index"] = int(best_split) if best_split != -1 else None
+                
+                # 시퀀셜: 가장 높은 점수를 가진 프레임 찾기 (각 쿼리별 최대값의 평균)
+                max_scores_per_query = np.max(scores_matrix, axis=0)  # 각 쿼리별 최대 점수
+                best_frame_idx = int(np.argmax(np.mean(scores_matrix, axis=1)))  # 평균이 가장 높은 프레임
             else:
+                # 비시퀀셜: 각 프레임의 최대 점수 사용
                 raw_scores_matrix = self.mm.get_clip_scores(frames, sub_queries)
-                raw_score = float(np.mean(raw_scores_matrix))
+                # 각 프레임에서 쿼리별 최대값을 찾고, 그 중 전체 최대값 사용
+                max_scores_per_frame = np.max(raw_scores_matrix, axis=1)  # 각 프레임별 최대 점수
+                max_score = float(np.max(max_scores_per_frame))  # 전체 최대 점수
+                best_frame_idx = int(np.argmax(max_scores_per_frame))  # 최고 점수 프레임 인덱스
+                
                 # 각 프레임별 점수 저장
                 frame_scores = {
                     f"query_{i}": raw_scores_matrix[:, i].tolist()
@@ -774,22 +873,23 @@ class AdaptiveSearchEngine:
             clip_time = time.time() - clip_start
             total_clip_inference_time += clip_time
 
-            clip_score_norm = self.normalize_score(raw_score)
-            print(f"  -> 정규화 CLIP 점수: {clip_score_norm:.2f} (프레임 추출: {frame_time:.2f}초, CLIP 추론: {clip_time:.2f}초)")
+            print(f"  -> 최대 CLIP 점수: {max_score:.4f} (프레임 추출: {frame_time:.2f}초, CLIP 추론: {clip_time:.2f}초)")
 
-            mid_img = frames[len(frames)//2]
+            # 가장 높은 점수를 가진 프레임을 썸네일로 저장
+            best_frame_img = frames[best_frame_idx]
             thumb_name = f"thumb_w{window_idx}_{current_time:.1f}.jpg"
             thumb_path = os.path.join(temp_thumb_dir, thumb_name)
-            mid_img.save(thumb_path, "JPEG", quality=85) # 파일로 저장
+            best_frame_img.save(thumb_path, "JPEG", quality=85)
             
             window_data = {
                 "start": current_time,
                 "end": end_time,
                 "timestamp": f"{self.vp.get_timestamp_str(current_time)} - {self.vp.get_timestamp_str(end_time)}",
-                "raw_score": raw_score,           # 참고용 원본 점수
-                "clip_score_norm": clip_score_norm,    # 정규화된 점수 (JSON 저장용)
+                "max_score": max_score,           # 최대 점수 (정규화 안 함)
+                "best_frame_idx": best_frame_idx,  # 최고 점수 프레임 인덱스
                 "frame_scores": frame_scores,  # 프레임별 점수 추가
                 "temp_img_path": thumb_path,  # 경로만 저장 (RAM 소모 0)
+                "is_sequential": is_sequential,  # 시퀀셜 여부 저장
             }
             all_windows.append(window_data)
             
@@ -797,11 +897,11 @@ class AdaptiveSearchEngine:
             self.vp.clear_memory() # 메모리 정리
 
             # 현재까지 최고 점수 윈도우 추적
-            if current_top_window is None or clip_score_norm > current_top_window['clip_score_norm']:
+            if current_top_window is None or max_score > current_top_window['max_score']:
                 current_top_window = window_data
                 print(f"  ⭐ 새로운 Top 윈도우 발견! ({current_top_window['timestamp']})\n")
             else:
-                print(f"  [현재 Top] {current_top_window['timestamp']} (점수: {current_top_window['clip_score_norm']:.4f})\n")
+                print(f"  [현재 Top] {current_top_window['timestamp']} (점수: {current_top_window['max_score']:.4f})\n")
 
             # 실시간 시각화 업데이트
             if visualizer:
@@ -809,7 +909,7 @@ class AdaptiveSearchEngine:
                     visualizer.update({
                         'start': current_time,
                         'end': end_time,
-                        'clip_score_norm': clip_score_norm
+                        'clip_score_norm': max_score  # 시각화에는 max_score 사용
                     })
                 except Exception as e:
                     print(f"  [시각화 경고] 업데이트 실패: {e}")
@@ -818,14 +918,14 @@ class AdaptiveSearchEngine:
 
         # CLIP 점수 기준 상위 K개 선별
         print(f"\n{'='*60}")
-        print(f"[1차 검색 완료] CLIP 점수 기준 상위 {k_top}개 후보 선별")
+        print(f"[1차 검색 완료] CLIP 최대 점수 기준 상위 {k_top}개 후보 선별")
         print(f"{'='*60}")
 
-        all_windows.sort(key=lambda x: x["clip_score_norm"], reverse=True)
+        all_windows.sort(key=lambda x: x["max_score"], reverse=True)
         top_k_candidates = all_windows[:k_top]
 
         for idx, item in enumerate(top_k_candidates, 1):
-            print(f"{idx}. {item['timestamp']} - 점수: {item['clip_score_norm']:.4f}")
+            print(f"{idx}. {item['timestamp']} - 최대 점수: {item['max_score']:.4f}")
 
         # 2. BLIP-2 기반 2차 보정 (Fine-grained Refinement)
         if self.mm.use_blip:
@@ -836,46 +936,111 @@ class AdaptiveSearchEngine:
             for idx, item in enumerate(top_k_candidates, 1):
                 print(f"[후보 {idx}/{k_top}] {item['timestamp']}")
 
-                # A. BLIP-2로 프레임 설명(Caption) 생성 - 시간 측정
-                blip_start = time.time()
-                img_for_blip = Image.open(item['temp_img_path'])
-                item['blip_caption'] = self.mm.generate_caption(img_for_blip)
-                blip_time = time.time() - blip_start
-                total_blip_inference_time += blip_time
+                # 시퀀셜인 경우와 비시퀀셜인 경우 처리 분리
+                if item.get('is_sequential', False) and 'best_split_index' in item['frame_scores'] and item['frame_scores']['best_split_index'] is not None:
+                    # 시퀀셜: 분할점 앞뒤의 대표 프레임을 각각 처리
+                    print("  [시퀀셜 쿼리] 분할점 앞뒤 프레임 각각 처리")
+                    
+                    best_split_idx = item['frame_scores']['best_split_index']
+                    
+                    # 해당 윈도우의 프레임 다시 추출
+                    frames_for_blip = self.vp.extract_window_frames(item['start'], item['end'], q_frames)
+                    
+                    # 분할점 앞부분의 중간 프레임
+                    if best_split_idx > 0:
+                        front_frame_idx = best_split_idx // 2
+                    else:
+                        front_frame_idx = 0
+                    
+                    # 분할점 뒷부분의 중간 프레임
+                    if best_split_idx < len(frames_for_blip) - 1:
+                        back_frame_idx = best_split_idx + (len(frames_for_blip) - best_split_idx) // 2
+                    else:
+                        back_frame_idx = len(frames_for_blip) - 1
+                    
+                    # A. 앞부분 프레임 캡션 생성
+                    blip_start = time.time()
+                    front_caption = self.mm.generate_caption(frames_for_blip[front_frame_idx])
+                    blip_time_front = time.time() - blip_start
+                    
+                    # B. 뒷부분 프레임 캡션 생성
+                    blip_start = time.time()
+                    back_caption = self.mm.generate_caption(frames_for_blip[back_frame_idx])
+                    blip_time_back = time.time() - blip_start
+                    
+                    total_blip_inference_time += (blip_time_front + blip_time_back)
+                    
+                    # C. 각 분할 쿼리와 캡션 간 유사도 계산
+                    semantic_start = time.time()
+                    semantic_sim_front = self.mm.compute_text_similarity(sub_queries[0], front_caption)
+                    semantic_sim_back = self.mm.compute_text_similarity(sub_queries[1], back_caption)
+                    semantic_time = time.time() - semantic_start
+                    total_blip_inference_time += semantic_time
+                    
+                    # 평균 유사도
+                    semantic_sim = (semantic_sim_front + semantic_sim_back) / 2
+                    
+                    item['blip_caption'] = f"[전반부] {front_caption} | [후반부] {back_caption}"
+                    item['semantic_consistency'] = semantic_sim
+                    item['semantic_front'] = semantic_sim_front
+                    item['semantic_back'] = semantic_sim_back
+                    
+                    # D. 최종 점수 산출 (시퀀셜은 max_score와 semantic_sim 조합)
+                    item['final_score'] = (item['max_score'] * weight_clip) + (semantic_sim * weight_semantic)
+                    
+                    print(f"  -> 앞부분 캡션: {front_caption}")
+                    print(f"  -> 뒷부분 캡션: {back_caption}")
+                    print(f"  -> 앞부분 유사도: {semantic_sim_front:.4f}")
+                    print(f"  -> 뒷부분 유사도: {semantic_sim_back:.4f}")
+                    print(f"  -> 평균 유사도: {semantic_sim:.4f}")
+                    print(f"  -> 최종 점수: {item['final_score']:.4f}")
+                    print(f"  -> BLIP-2 처리 시간: {blip_time_front + blip_time_back + semantic_time:.2f}초\n")
+                    
+                    del frames_for_blip
+                else:
+                    # 비시퀀셜: 기존 방식 (최고 점수 프레임 1개만 처리)
+                    print("  [단일 쿼리] 최고 점수 프레임 처리")
+                    
+                    # A. BLIP-2로 프레임 설명(Caption) 생성 - 시간 측정
+                    blip_start = time.time()
+                    img_for_blip = Image.open(item['temp_img_path'])
+                    item['blip_caption'] = self.mm.generate_caption(img_for_blip)
+                    blip_time = time.time() - blip_start
+                    total_blip_inference_time += blip_time
 
-                del img_for_blip
+                    del img_for_blip
 
-                # B. 사용자 쿼리와 생성된 캡션 간의 의미적 유사도 계산 (Text-to-Text)
-                semantic_start = time.time()
-                semantic_sim = self.mm.compute_text_similarity(original_query, item['blip_caption'])
-                semantic_time = time.time() - semantic_start
-                total_blip_inference_time += semantic_time
+                    # B. 사용자 쿼리와 생성된 캡션 간의 의미적 유사도 계산 (Text-to-Text)
+                    semantic_start = time.time()
+                    semantic_sim = self.mm.compute_text_similarity(original_query, item['blip_caption'])
+                    semantic_time = time.time() - semantic_start
+                    total_blip_inference_time += semantic_time
 
-                item['semantic_consistency'] = semantic_sim
+                    item['semantic_consistency'] = semantic_sim
 
-                # C. 최종 점수 산출 (앙상블)
-                item['final_score'] = (item['clip_score_norm'] * weight_clip) + (semantic_sim * weight_semantic)
+                    # C. 최종 점수 산출 (앙상블)
+                    item['final_score'] = (item['max_score'] * weight_clip) + (semantic_sim * weight_semantic)
 
-                print(f"  -> 생성된 캡션: {item['blip_caption']}")
-                print(f"  -> 의미 유사도: {semantic_sim:.4f}")
-                print(f"  -> 최종 점수: {item['final_score']:.4f}")
-                print(f"  -> BLIP-2 처리 시간: {blip_time + semantic_time:.2f}초\n")
+                    print(f"  -> 생성된 캡션: {item['blip_caption']}")
+                    print(f"  -> 의미 유사도: {semantic_sim:.4f}")
+                    print(f"  -> 최종 점수: {item['final_score']:.4f}")
+                    print(f"  -> BLIP-2 처리 시간: {blip_time + semantic_time:.2f}초\n")
 
             # 보정된 최종 점수로 다시 정렬
-            top_k_candidates.sort(key=lambda x: x.get('final_score', x['clip_score_norm']), reverse=True)
+            top_k_candidates.sort(key=lambda x: x.get('final_score', x['max_score']), reverse=True)
 
             print(f"{'='*60}")
             print(f"[최종 순위]")
             print(f"{'='*60}")
             for idx, item in enumerate(top_k_candidates, 1):
-                print(f"{idx}. {item['timestamp']} - 최종 점수: {item.get('final_score', item['clip_score_norm']):.4f}")
+                print(f"{idx}. {item['timestamp']} - 최종 점수: {item.get('final_score', item['max_score']):.4f}")
         else:
             # BLIP-2 없을 때도 최종 순위 출력
             print(f"\n{'='*60}")
             print(f"[최종 순위]")
             print(f"{'='*60}")
             for idx, item in enumerate(top_k_candidates, 1):
-                print(f"{idx}. {item['timestamp']} - 점수: {item['clip_score_norm']:.4f}")
+                print(f"{idx}. {item['timestamp']} - 최대 점수: {item['max_score']:.4f}")
 
         print()
 
@@ -902,26 +1067,36 @@ class AdaptiveSearchEngine:
         return top_k_candidates, all_windows, visualizer
 
 # # ==========================================
-# # 모델 초기화 (이 셀은 런타임 시작 시 1번만 실행!)
-# # ==========================================
+# ==========================================
+# 모델 초기화 (이 셀은 런타임 시작 시 1번만 실행!)
+# ==========================================
 # print("🔄 모델 초기화 확인 중...")
 
-# # Configuration
-# USE_BLIP = True  # BLIP-2 사용 여부 (메모리 주의)
+# USE_NEW_VIDEO_PROCESSOR = input("새로운 VideoProcessor를 생성하시겠습니까? (Y/N) 메모리 낭비가 생길 수도 있으니, 비디오 파일이 그대로라면 N을 눌러주세요.") 
+# USE_NEW_VIDEO_PROCESSOR = True if USE_NEW_VIDEO_PROCESSOR == "Y" or USE_NEW_VIDEO_PROCESSOR == "y" else False
+# print(f"USE_NEW_VIDEO_PROCESSOR: {USE_NEW_VIDEO_PROCESSOR}")
+# VIDEO_PATH = "sample_video.mp4" # 준비된 비디오 파일 경로
 
+# if USE_NEW_VIDEO_PROCESSOR:
+#     init_start_time = time.time()
+#     video_processor = VideoProcessor(VIDEO_PATH)
+#     print(f"✅ VideoProcessor 초기화 완료 ({time.time() - init_start_time:.2f}초)")
+# else:
+#     print("♻️ 기존 VideoProcessor 재사용 (메모리 절약!)")
+
+# # Configuration
+# USE_BLIP = input("Blip2를 새로 로드하시겠습니까? (Y/N)메모리가 터질 수도 있으니, 이미 있다면 N을 눌러주세요.")  # BLIP-2 사용 여부 (메모리 주의)
+# USE_BLIP = True if USE_BLIP == "Y" or USE_BLIP == "y" else False
+# print(f"USE_BLIP: {USE_BLIP}")
 # # Initialize (전역 변수로 저장)
 # # 이미 초기화되었는지 확인
-# if 'model_manager' not in globals():
+# if USE_BLIP:
 #     print("🔄 ModelManager 초기화 중...")
 #     init_start_time = time.time()
 #     model_manager = ModelManager(use_blip=USE_BLIP)
 #     print(f"✅ ModelManager 초기화 완료 ({time.time() - init_start_time:.2f}초)")
 # else:
 #     print("♻️ 기존 ModelManager 재사용 (메모리 절약!)")
-
-# # USE_BLIP 사용 여부 변경했을 경우에는 
-# # 위 코드 블럭 주석 처리하고 아래 코드 실행
-# # model_manager = ModelManager(use_blip=USE_BLIP)
 
 # print("✅ 모델 초기화 완료! 이제 아래 실행 셀을 여러 번 실행해도 모델이 다시 로드되지 않습니다.")
 
@@ -985,6 +1160,7 @@ def main():
     p_list = [2.0, 4.0]      # 윈도우 크기 (초)
     q_list = [12, 24, 48]         # 샘플링 프레임 수
     k_list = [3, 5]          # Top-K 개수
+    STEP_SEC = 1.0           # 윈도우 이동 간격 (초) - 윈도우 크기보다 작으면 겹침
     WEIGHT_CLIP = 0.7
     WEIGHT_SEMANTIC = 0.3
     USE_LOOP = False         # 반복 실행 여부
@@ -1034,7 +1210,7 @@ def main():
                     print(f"\n--- Running Experiment: p={p}, q={q}, k={k} ---")
 
                     # Perform Search (실시간 시각화 활성화)
-                    results, all_windows_data, visualizer = engine.search(QUERY, sub_queries, p, q, k, WEIGHT_CLIP, WEIGHT_SEMANTIC, enable_visualization=True, save_path=SAVE_PATH)
+                    results, all_windows_data, visualizer = engine.search(QUERY, sub_queries, p, q, k, STEP_SEC, WEIGHT_CLIP, WEIGHT_SEMANTIC, enable_visualization=True, save_path=SAVE_PATH)
 
                     # 전체 실행 시간 계산
                     total_elapsed_time = time.time() - program_start_time
@@ -1105,7 +1281,7 @@ def main():
 
     # 반복 실행 아닐 때
     else:
-        results, all_windows_data, visualizer = engine.search(QUERY, sub_queries, p_list[0], q_list[0], k_list[0], WEIGHT_CLIP, WEIGHT_SEMANTIC, enable_visualization=True, save_path=SAVE_PATH)
+        results, all_windows_data, visualizer = engine.search(QUERY, sub_queries, p_list[0], q_list[0], k_list[0], STEP_SEC, WEIGHT_CLIP, WEIGHT_SEMANTIC, enable_visualization=True, save_path=SAVE_PATH)
 
         # 전체 실행 시간 계산
         total_elapsed_time = time.time() - program_start_time
