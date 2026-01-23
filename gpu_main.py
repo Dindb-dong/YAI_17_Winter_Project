@@ -902,26 +902,36 @@ class AdaptiveSearchEngine:
         return top_k_candidates, all_windows, visualizer
 
 # # ==========================================
-# # 모델 초기화 (이 셀은 런타임 시작 시 1번만 실행!)
-# # ==========================================
+# ==========================================
+# 모델 초기화 (이 셀은 런타임 시작 시 1번만 실행!)
+# ==========================================
 # print("🔄 모델 초기화 확인 중...")
 
-# # Configuration
-# USE_BLIP = True  # BLIP-2 사용 여부 (메모리 주의)
+# USE_NEW_VIDEO_PROCESSOR = input("새로운 VideoProcessor를 생성하시겠습니까? (Y/N) 메모리 낭비가 생길 수도 있으니, 비디오 파일이 그대로라면 N을 눌러주세요.") 
+# USE_NEW_VIDEO_PROCESSOR = True if USE_NEW_VIDEO_PROCESSOR == "Y" or USE_NEW_VIDEO_PROCESSOR == "y" else False
+# print(f"USE_NEW_VIDEO_PROCESSOR: {USE_NEW_VIDEO_PROCESSOR}")
+# VIDEO_PATH = "sample_video.mp4" # 준비된 비디오 파일 경로
 
+# if USE_NEW_VIDEO_PROCESSOR:
+#     init_start_time = time.time()
+#     video_processor = VideoProcessor(VIDEO_PATH)
+#     print(f"✅ VideoProcessor 초기화 완료 ({time.time() - init_start_time:.2f}초)")
+# else:
+#     print("♻️ 기존 VideoProcessor 재사용 (메모리 절약!)")
+
+# # Configuration
+# USE_BLIP = input("Blip2를 새로 로드하시겠습니까? (Y/N)메모리가 터질 수도 있으니, 이미 있다면 N을 눌러주세요.")  # BLIP-2 사용 여부 (메모리 주의)
+# USE_BLIP = True if USE_BLIP == "Y" or USE_BLIP == "y" else False
+# print(f"USE_BLIP: {USE_BLIP}")
 # # Initialize (전역 변수로 저장)
 # # 이미 초기화되었는지 확인
-# if 'model_manager' not in globals():
+# if USE_BLIP:
 #     print("🔄 ModelManager 초기화 중...")
 #     init_start_time = time.time()
 #     model_manager = ModelManager(use_blip=USE_BLIP)
 #     print(f"✅ ModelManager 초기화 완료 ({time.time() - init_start_time:.2f}초)")
 # else:
 #     print("♻️ 기존 ModelManager 재사용 (메모리 절약!)")
-
-# # USE_BLIP 사용 여부 변경했을 경우에는 
-# # 위 코드 블럭 주석 처리하고 아래 코드 실행
-# # model_manager = ModelManager(use_blip=USE_BLIP)
 
 # print("✅ 모델 초기화 완료! 이제 아래 실행 셀을 여러 번 실행해도 모델이 다시 로드되지 않습니다.")
 
