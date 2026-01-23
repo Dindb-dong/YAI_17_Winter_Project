@@ -763,7 +763,7 @@ class AdaptiveSearchEngine:
         # 0~100 사이로 클리핑
         return float(np.clip(normalized, 0, 100))
 
-    def search(self, original_query, sub_queries, p_sec, q_frames, k_top, weight_clip = 0.7, weight_semantic = 0.3, enable_visualization=True, save_path="results"):
+    def search(self, original_query, sub_queries, p_sec, q_frames, k_top, step_sec=1.0, weight_clip = 0.7, weight_semantic = 0.3, enable_visualization=True, save_path="results"):
         """
         Adaptive Search Engine 실행 메인 로직
         - 1. CLIP 기반 1차 검색 (Coarse-grained Search)
@@ -771,6 +771,14 @@ class AdaptiveSearchEngine:
         - 3. 최종 점수 산출 및 정렬
 
         Args:
+            original_query: 원본 쿼리
+            sub_queries: 분할된 쿼리 리스트
+            p_sec: 윈도우 크기 (초)
+            q_frames: 샘플링 프레임 수
+            k_top: Top-K 개수
+            step_sec: 윈도우 이동 간격 (초) - p_sec보다 작으면 윈도우가 겹침
+            weight_clip: CLIP 점수 가중치
+            weight_semantic: Semantic 점수 가중치
             enable_visualization: 실시간 시각화 활성화 여부
             save_path: 시각화 이미지 저장 경로
         """
@@ -784,11 +792,11 @@ class AdaptiveSearchEngine:
         is_sequential = len(sub_queries) > 1
 
         all_windows = []
-        step_size = p_sec  # 윈도우가 겹치지 않도록 수정
+        step_size = step_sec  # 윈도우 이동 간격 (사용자 정의 가능)
         current_time = 0.0
 
-        # 전체 윈도우 개수 계산 (정확한 계산)
-        total_windows = int(np.ceil(self.vp.duration / step_size))
+        # 전체 윈도우 개수 계산 (겹칠 수 있으므로 정확한 계산)
+        total_windows = int(np.ceil((self.vp.duration - p_sec) / step_size)) + 1
 
         # 실시간 시각화 초기화
         visualizer = None
@@ -1152,6 +1160,7 @@ def main():
     p_list = [2.0, 4.0]      # 윈도우 크기 (초)
     q_list = [12, 24, 48]         # 샘플링 프레임 수
     k_list = [3, 5]          # Top-K 개수
+    STEP_SEC = 1.0           # 윈도우 이동 간격 (초) - 윈도우 크기보다 작으면 겹침
     WEIGHT_CLIP = 0.7
     WEIGHT_SEMANTIC = 0.3
     USE_LOOP = False         # 반복 실행 여부
@@ -1201,7 +1210,7 @@ def main():
                     print(f"\n--- Running Experiment: p={p}, q={q}, k={k} ---")
 
                     # Perform Search (실시간 시각화 활성화)
-                    results, all_windows_data, visualizer = engine.search(QUERY, sub_queries, p, q, k, WEIGHT_CLIP, WEIGHT_SEMANTIC, enable_visualization=True, save_path=SAVE_PATH)
+                    results, all_windows_data, visualizer = engine.search(QUERY, sub_queries, p, q, k, STEP_SEC, WEIGHT_CLIP, WEIGHT_SEMANTIC, enable_visualization=True, save_path=SAVE_PATH)
 
                     # 전체 실행 시간 계산
                     total_elapsed_time = time.time() - program_start_time
@@ -1272,7 +1281,7 @@ def main():
 
     # 반복 실행 아닐 때
     else:
-        results, all_windows_data, visualizer = engine.search(QUERY, sub_queries, p_list[0], q_list[0], k_list[0], WEIGHT_CLIP, WEIGHT_SEMANTIC, enable_visualization=True, save_path=SAVE_PATH)
+        results, all_windows_data, visualizer = engine.search(QUERY, sub_queries, p_list[0], q_list[0], k_list[0], STEP_SEC, WEIGHT_CLIP, WEIGHT_SEMANTIC, enable_visualization=True, save_path=SAVE_PATH)
 
         # 전체 실행 시간 계산
         total_elapsed_time = time.time() - program_start_time
