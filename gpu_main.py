@@ -966,7 +966,7 @@ class AdaptiveSearchEngine:
                 print(f"[후보 {idx}/{k_top}] {item['timestamp']}")
 
                 # 시퀀셜인 경우와 비시퀀셜인 경우 처리 분리
-                if item.get('is_sequential', False) and 'best_split_index' in item['frame_scores'] and item['frame_scores']['best_split_index'] is not None:
+                if is_sequential:
                     # 시퀀셜: 분할점 앞뒤의 대표 프레임을 각각 처리
                     print("  [시퀀셜 쿼리] 분할점 앞뒤 프레임 각각 처리")
                     
