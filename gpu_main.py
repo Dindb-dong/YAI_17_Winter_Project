@@ -124,12 +124,35 @@ class ModelManager:
             cosine_sim = torch.matmul(image_embeds, text_embeds.T)
         return cosine_sim.cpu().numpy()
 
-    def generate_caption(self, image: Image.Image) -> str:
-        """Generates caption using BLIP-2"""
+    def generate_caption(self, image: Image.Image, prompt: str = None) -> str:
+        """
+        Generates caption using BLIP-2 with optional prompt
+        
+        Args:
+            image: PIL Image
+            prompt: 힌트로 사용할 쿼리 (선택)
+        
+        Returns:
+            생성된 캡션
+        """
         if not self.use_blip:
             return ""
-        inputs = self.blip_processor(images=image, return_tensors="pt").to(self.device, torch.float16)
-        generated_ids = self.blip_model.generate(**inputs)
+        
+        if prompt:
+            # 프롬프트를 "힌트"로 활용하는 instruction 생성
+            # BLIP-2는 영어 instruction이 더 효과적
+            instruction = (
+                f"Question: Here is a hint that might help identify objects in this image: '{prompt}'. "
+                f"This hint could be correct or slightly incorrect, but it's generally reliable. "
+                f"Using this hint as a guide, describe exactly what you see in this image. "
+                f"Focus on the objects, their positions, and actions. Answer:"
+            )
+            inputs = self.blip_processor(images=image, text=instruction, return_tensors="pt").to(self.device, torch.float16)
+        else:
+            # 기존 방식 (프롬프트 없음)
+            inputs = self.blip_processor(images=image, return_tensors="pt").to(self.device, torch.float16)
+        
+        generated_ids = self.blip_model.generate(**inputs, max_length=50)
         return self.blip_processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
 
     def get_text_features(self, text_list: List[str]):
@@ -721,39 +744,37 @@ class AdaptiveSearchEngine:
 
     def calculate_sequential_score(self, frames, sub_queries):
         """
-        [변곡점 탐지 로직]
-        쿼리가 A -> B로 나뉘었을 때, 프레임 시퀀스 내에서 최적의 분할 지점을 찾아
-        (A유사도 + B유사도)가 최대가 되는 점수를 반환합니다.
-        Returns: (max_score, scores_matrix, best_split_index)
+        [시퀀셜 쿼리 점수 계산]
+        쿼리가 A -> B로 나뉘었을 때, 각 쿼리에 대해 가장 높은 점수를 가진 프레임을 찾습니다.
+        
+        Returns: (max_score, scores_matrix, front_frame_idx, back_frame_idx)
+            - max_score: front와 back의 평균 점수
+            - scores_matrix: (q_frames, 2_sub_queries) 점수 행렬
+            - front_frame_idx: 쿼리 0(앞부분)에 대해 최고 점수 프레임 인덱스
+            - back_frame_idx: 쿼리 1(뒷부분)에 대해 최고 점수 프레임 인덱스
         """
         # (q_frames, 2_sub_queries) matrix
         scores_matrix = self.mm.get_clip_scores(frames, sub_queries)
-        q_len = len(frames)
-        max_score = -1.0
-        best_split = -1
-
-        # Linear Scan to find Change Point
-        # 최소 10% 지점부터 90% 지점 사이에서 분할 시도
-        start_idx = int(q_len * 0.1)
-        end_idx = int(q_len * 0.9)
 
         if len(sub_queries) == 2:
-            score_A = scores_matrix[:, 0] # Similarity curve for Query A
-            score_B = scores_matrix[:, 1] # Similarity curve for Query B
+            score_A = scores_matrix[:, 0]  # Similarity curve for Query A (앞부분)
+            score_B = scores_matrix[:, 1]  # Similarity curve for Query B (뒷부분)
 
-            for t in range(start_idx, end_idx):
-                # t 시점까지는 A, t 이후는 B
-                avg_A = np.mean(score_A[:t])
-                avg_B = np.mean(score_B[t:])
-                combined_score = (avg_A + avg_B) / 2
-
-                if combined_score > max_score:
-                    max_score = combined_score
-                    best_split = t
+            # 각 쿼리에 대해 가장 높은 점수를 가진 프레임 찾기
+            front_frame_idx = int(np.argmax(score_A))
+            back_frame_idx = int(np.argmax(score_B))
+            
+            # 두 프레임의 점수 평균을 max_score로 사용
+            front_score = float(score_A[front_frame_idx])
+            back_score = float(score_B[back_frame_idx])
+            max_score = (front_score + back_score) / 2.0
+            
+            return float(max_score), scores_matrix, front_frame_idx, back_frame_idx
         else:
+            # 단일 쿼리인 경우 (fallback)
             max_score = np.mean(np.max(scores_matrix, axis=1))
-
-        return float(max_score), scores_matrix, best_split
+            best_idx = int(np.argmax(np.max(scores_matrix, axis=1)))
+            return float(max_score), scores_matrix, best_idx, best_idx
 
     def normalize_score(self, raw_score: float) -> float:
         """
@@ -852,18 +873,19 @@ class AdaptiveSearchEngine:
             # CLIP 추론 시간 측정
             clip_start = time.time()
             if is_sequential:
-                # 시퀀셜: calculate_sequential_score가 반환하는 max_score 사용
-                max_score, scores_matrix, best_split = self.calculate_sequential_score(frames, sub_queries)
+                # 시퀀셜: calculate_sequential_score가 반환하는 max_score와 인덱스들 사용
+                max_score, scores_matrix, front_frame_idx, back_frame_idx = self.calculate_sequential_score(frames, sub_queries)
+                
                 # 각 프레임별 점수 저장 (시퀀셜의 경우 두 쿼리에 대한 점수)
                 frame_scores = {
                     f"query_{i}": scores_matrix[:, i].tolist()
                     for i in range(len(sub_queries))
                 }
-                frame_scores["best_split_index"] = int(best_split) if best_split != -1 else None
+                frame_scores["front_frame_idx"] = front_frame_idx  # 쿼리 0의 최고 점수 프레임
+                frame_scores["back_frame_idx"] = back_frame_idx    # 쿼리 1의 최고 점수 프레임
                 
-                # 시퀀셜: 가장 높은 점수를 가진 프레임 찾기 (각 쿼리별 최대값의 평균)
-                max_scores_per_query = np.max(scores_matrix, axis=0)  # 각 쿼리별 최대 점수
-                best_frame_idx = int(np.argmax(np.mean(scores_matrix, axis=1)))  # 평균이 가장 높은 프레임
+                # 썸네일은 front_frame (앞부분 쿼리의 최고 점수 프레임) 사용
+                best_frame_idx = front_frame_idx
             else:
                 # 비시퀀셜: 각 프레임의 최대 점수 사용
                 raw_scores_matrix = self.mm.get_clip_scores(frames, sub_queries)
@@ -948,31 +970,21 @@ class AdaptiveSearchEngine:
                     # 시퀀셜: 분할점 앞뒤의 대표 프레임을 각각 처리
                     print("  [시퀀셜 쿼리] 분할점 앞뒤 프레임 각각 처리")
                     
-                    best_split_idx = item['frame_scores']['best_split_index']
+                    # frame_scores에서 front_frame_idx와 back_frame_idx 가져오기
+                    front_frame_idx = item['frame_scores']['front_frame_idx']
+                    back_frame_idx = item['frame_scores']['back_frame_idx']
                     
                     # 해당 윈도우의 프레임 다시 추출
                     frames_for_blip = self.vp.extract_window_frames(item['start'], item['end'], q_frames)
                     
-                    # 분할점 앞부분의 중간 프레임
-                    if best_split_idx > 0:
-                        front_frame_idx = best_split_idx // 2
-                    else:
-                        front_frame_idx = 0
-                    
-                    # 분할점 뒷부분의 중간 프레임
-                    if best_split_idx < len(frames_for_blip) - 1:
-                        back_frame_idx = best_split_idx + (len(frames_for_blip) - best_split_idx) // 2
-                    else:
-                        back_frame_idx = len(frames_for_blip) - 1
-                    
-                    # A. 앞부분 프레임 캡션 생성
+                    # A. 앞부분 프레임 캡션 생성 (쿼리 0의 최고 점수 프레임)
                     blip_start = time.time()
-                    front_caption = self.mm.generate_caption(frames_for_blip[front_frame_idx])
+                    front_caption = self.mm.generate_caption(frames_for_blip[front_frame_idx], sub_queries[0])
                     blip_time_front = time.time() - blip_start
                     
-                    # B. 뒷부분 프레임 캡션 생성
+                    # B. 뒷부분 프레임 캡션 생성 (쿼리 1의 최고 점수 프레임)
                     blip_start = time.time()
-                    back_caption = self.mm.generate_caption(frames_for_blip[back_frame_idx])
+                    back_caption = self.mm.generate_caption(frames_for_blip[back_frame_idx], sub_queries[1])
                     blip_time_back = time.time() - blip_start
                     
                     total_blip_inference_time += (blip_time_front + blip_time_back)
@@ -995,6 +1007,8 @@ class AdaptiveSearchEngine:
                     # D. 최종 점수 산출 (시퀀셜은 max_score와 semantic_sim 조합)
                     item['final_score'] = (item['max_score'] * weight_clip) + (semantic_sim * weight_semantic)
                     
+                    print(f"  -> 앞부분 프레임 인덱스: {front_frame_idx}")
+                    print(f"  -> 뒷부분 프레임 인덱스: {back_frame_idx}")
                     print(f"  -> 앞부분 캡션: {front_caption}")
                     print(f"  -> 뒷부분 캡션: {back_caption}")
                     print(f"  -> 앞부분 유사도: {semantic_sim_front:.4f}")
