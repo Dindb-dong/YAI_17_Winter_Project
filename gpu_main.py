@@ -141,7 +141,7 @@ class ModelManager:
         if prompt:
             # 프롬프트를 "힌트"로 활용하는 instruction 생성
             # BLIP-2는 영어 instruction이 더 효과적
-            instruction = f"Based on the hint '{prompt}', describe this image in detail:"
+            instruction = f"Based on the hint '{prompt}', this image shows"
             inputs = self.blip_processor(images=image, text=instruction, return_tensors="pt").to(self.device, torch.float16)
         else:
             # 기존 방식 (프롬프트 없음)
@@ -160,9 +160,10 @@ class ModelManager:
         # 반환 값에는 제공한 프롬프트가 있으면 안 됨 
         raw_answer = self.blip_processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
         # "detail:" 이후의 텍스트만 포함해야 함 (문장 분리 후 첫 번째 문장)
-        detail_start = raw_answer.find("detail:")
+        search_str = ", this image shows"
+        detail_start = raw_answer.find(search_str)
         if detail_start != -1:
-            modified_answer = raw_answer[detail_start:]
+            modified_answer = raw_answer[detail_start + len(search_str):].strip()
         else:
             modified_answer = raw_answer
         return modified_answer.strip()
@@ -356,94 +357,166 @@ class RealTimeVisualizer:
             total_duration: 비디오 총 길이 (초)
             k_top: Top-K 개수
             save_path: 그래프 이미지 저장 경로
-            video_processor: VideoProcessor 인스턴스 (프레임 이미지 표시용)
+            video_processor: VideoProcessor 인스턴스 (비디오 재생용)
         """
         self.total_duration = total_duration
         self.k_top = k_top
         self.save_path = save_path
         self.video_processor = video_processor
+        self.video_path = getattr(video_processor, "video_path", None)
         self.window_data = []
         self.current_top_k = []
         self.is_complete = False
         self.save_filename = None
-        self.current_frame_idx = {}  # 각 Top-K 항목별 현재 표시 중인 프레임 인덱스
-        self.last_thumb_path = None  # 실시간 표시용 썸네일 경로
+
+        # 노트북 UI 핸들 (있는 경우에만)
+        self.widgets = None
+        self.display = None
+        self.clear_output = None
+        self.Video = None
+        self.HTML = None
+        self.container = None
+        self.video_out = None
+        self.controls_out = None
+        self.plot_out = None
+        self.replay_button = None
 
         # 환경 감지 (Colab/Kaggle vs 로컬)
         self.is_notebook = self._is_notebook_environment()
         
         if self.is_notebook:
-            # Colab/Kaggle: IPython display 사용 (별도 출력 영역으로 로그 보호)
+            # Colab/Kaggle: 비디오(상단) + 그래프(하단) 출력 분리 (다른 로그 보호)
             try:
-                from IPython.display import display, HTML, clear_output
-                from ipywidgets import Output
+                from IPython.display import display, clear_output, Video, HTML
+                import ipywidgets as widgets
+
                 self.display = display
                 self.clear_output = clear_output
+                self.Video = Video
                 self.HTML = HTML
-                
-                # 별도의 출력 영역 생성 (다른 로그와 분리)
-                self.output_widget = Output()
-                display(self.output_widget)
-                print("📊 [Notebook 환경] 별도 출력 영역으로 시각화 (다른 로그 보호됨)")
+                self.widgets = widgets
+
+                self.video_out = widgets.Output()
+                self.controls_out = widgets.Output()
+                self.plot_out = widgets.Output()
+                self.container = widgets.VBox([self.video_out, self.controls_out, self.plot_out])
+                display(self.container)
+
+                self._render_video(autoplay=True, loop=True)
+                self._render_controls()
+                print("📊 [Notebook 환경] 비디오(상단) + 그래프(하단) 분리 시각화")
             except ImportError:
-                print("⚠️ IPython을 찾을 수 없습니다. 시각화를 비활성화합니다.")
+                print("⚠️ IPython/ipywidgets를 찾을 수 없습니다. 시각화를 비활성화합니다.")
                 self.is_notebook = False
-                self.output_widget = None
         else:
             # 로컬: Interactive mode
             print("📊 [로컬 환경] Interactive 모드로 시각화")
             plt.ion()
-            self.output_widget = None
 
-        # Figure 설정 (2행 1열: 위=현재 프레임 이미지, 아래=그래프)
-        self.fig = plt.figure(figsize=(14, 9))
-        gs = self.fig.add_gridspec(2, 1, height_ratios=[3, 2], hspace=0.15)
-        self.ax_img = self.fig.add_subplot(gs[0])
-        self.ax_plot = self.fig.add_subplot(gs[1])
+        # 그래프 Figure 설정
+        self.fig, self.ax_plot = plt.subplots(figsize=(14, 6))
         self.fig.suptitle('Real-time Video Search Similarity Scores', fontsize=14, fontweight='bold')
-    
-    def show_processing_frame(self, thumb_path: str, title: str | None = None):
-        """
-        (실시간 프리뷰) 현재 계산/처리 중인 프레임 이미지만 갱신해서 보여줍니다.
-        - 그래프 데이터(window_data)는 건드리지 않습니다.
-        """
-        if not thumb_path:
+        if self.is_notebook and self.plot_out:
+            with self.plot_out:
+                self.display(self.fig)
+
+    def _render_video(self, autoplay: bool = False, loop: bool = False):
+        """노트북 상단에 비디오 플레이어를 렌더링"""
+        if not (self.is_notebook and self.video_out and self.display and self.HTML):
             return
 
-        self.last_thumb_path = thumb_path
-        self._draw_current_image(thumb_path=thumb_path, title=title)
+        with self.video_out:
+            self.clear_output(wait=True)
+            if not self.video_path or not os.path.exists(self.video_path):
+                self.display(self.HTML("<div style='padding:8px; background:#fff3cd; border:1px solid #ddd;'>비디오 파일을 찾을 수 없습니다.</div>"))
+                return
 
-        if self.is_notebook and self.output_widget:
-            with self.output_widget:
-                self.clear_output(wait=True)
-                self.display(self.fig)
-        elif not self.is_notebook:
-            plt.pause(0.001)
-
-    def _draw_current_image(self, thumb_path: str | None = None, title: str | None = None):
-        """상단 이미지 영역(ax_img)만 갱신"""
-        self.ax_img.clear()
-        self.ax_img.axis("off")
-
-        path = thumb_path or self.last_thumb_path
-        if path and os.path.exists(path):
             try:
-                img = Image.open(path)
-                self.ax_img.imshow(img)
-                if title:
-                    self.ax_img.set_title(title, fontsize=11, fontweight="bold")
-            except Exception as e:
-                self.ax_img.text(
-                    0.5, 0.5,
-                    f"Failed to load thumbnail:\n{path}\n{e}",
-                    ha="center", va="center", fontsize=10
-                )
-        else:
-            self.ax_img.text(
-                0.5, 0.5,
-                "No thumbnail available yet.",
-                ha="center", va="center", fontsize=11, fontweight="bold"
-            )
+                size = os.path.getsize(self.video_path)
+            except Exception:
+                size = None
+
+            # 너무 큰 파일은 base64 embed가 무거움 → 작은 파일만 data-uri embed
+            embed = bool(size is not None and size <= 25 * 1024 * 1024)
+
+            attrs = ["controls"]
+            if autoplay:
+                attrs.append("autoplay")
+            if loop:
+                attrs.append("loop")
+            html_attrs = " ".join(attrs)
+
+            video_id = "rtv_video"
+
+            if embed:
+                import base64
+                with open(self.video_path, "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode("ascii")
+                src = f"data:video/mp4;base64,{b64}"
+            else:
+                # NOTE: 환경에 따라 로컬 파일 src가 안 먹을 수 있음 (Colab은 보통 embed 권장)
+                src = os.path.basename(self.video_path)
+
+            self.display(self.HTML(
+                f"""
+                <div style="margin:8px 0;">
+                  <video id="{video_id}" {html_attrs} style="max-width:100%; border:1px solid #ddd; border-radius:6px;">
+                    <source src="{src}" type="video/mp4">
+                  </video>
+                </div>
+                """
+            ))
+
+    def _render_controls(self, top_k: list | None = None):
+        """노트북 상단 컨트롤(Replay + Jump Top-K) 렌더링"""
+        if not (self.is_notebook and self.controls_out and self.display and self.HTML):
+            return
+
+        with self.controls_out:
+            self.clear_output(wait=True)
+            # JS helpers + buttons (ipywidgets 없이 HTML로 처리: Colab/Jupyter에서 더 안정적)
+            buttons_html = []
+
+            buttons_html.append("""
+            <script>
+              function rtvVideo() { return document.getElementById('rtv_video'); }
+              function rtvSeek(t) {
+                var v = rtvVideo();
+                if (!v) { console.log('rtv_video not found'); return; }
+                v.currentTime = t;
+                var p = v.play();
+                if (p && p.catch) { p.catch(()=>{}); }
+              }
+              function rtvReplay() { rtvSeek(0); }
+            </script>
+            """)
+
+            buttons_html.append("""
+            <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:8px 0;">
+              <button onclick="rtvReplay()"
+                style="padding:8px 12px; background:#1f77b4; color:white; border:0; border-radius:6px; cursor:pointer;">
+                Replay
+              </button>
+            """)
+
+            if top_k:
+                for i, w in enumerate(top_k, 1):
+                    try:
+                        s = float(w.get("start", 0.0))
+                    except Exception:
+                        s = 0.0
+                    label = w.get("timestamp", f"{s:.1f}s")
+                    buttons_html.append(
+                        f"""
+                        <button onclick="rtvSeek({s})"
+                          style="padding:8px 12px; background:#2ca02c; color:white; border:0; border-radius:6px; cursor:pointer;">
+                          Jump Top {i} ({label})
+                        </button>
+                        """
+                    )
+
+            buttons_html.append("</div>")
+            self.display(self.HTML("\n".join(buttons_html)))
 
     def _is_notebook_environment(self):
         """
@@ -486,21 +559,16 @@ class RealTimeVisualizer:
             window_info: {'start': float, 'end': float, 'clip_score_norm': float, 'is_top_k': bool}
         """
         self.window_data.append(window_info)
-        if window_info.get("thumb_path"):
-            self.last_thumb_path = window_info["thumb_path"]
 
         # 현재까지의 Top-K 계산
         sorted_windows = sorted(self.window_data, key=lambda x: x['clip_score_norm'], reverse=True)
         self.current_top_k = sorted_windows[:self.k_top]
 
-        # NOTE:
-        # show_processing_frame()가 상단 이미지(ax_img)를 담당합니다.
-        # update()는 그래프(ax_plot)만 갱신해서 "processing frame"을 덮어쓰지 않게 합니다.
         self._draw_plot_only()
         
         # 노트북 환경에서는 별도 출력 영역에만 표시 (다른 로그 보호)
-        if self.is_notebook and self.output_widget:
-            with self.output_widget:
+        if self.is_notebook and self.plot_out:
+            with self.plot_out:
                 self.clear_output(wait=True)
                 self.display(self.fig)
 
@@ -516,12 +584,14 @@ class RealTimeVisualizer:
         self._draw_plot_only()
         
         # 노트북 환경에서는 별도 출력 영역에만 표시 (다른 로그 보호)
-        if self.is_notebook and self.output_widget:
-            with self.output_widget:
+        if self.is_notebook and self.plot_out:
+            with self.plot_out:
                 self.clear_output(wait=True)
                 self.display(self.fig)
-                # Top-K 갤러리는 최종에만 표시
-                self._display_frame_images(final_top_k, is_final=True)
+
+        # 끝나면 Jump Top-K 버튼까지 포함해서 컨트롤 갱신
+        if self.is_notebook and self.controls_out:
+            self._render_controls(top_k=final_top_k)
 
     def _draw_plot_only(self):
         """그래프(ax_plot)만 그리기 (상단 이미지(ax_img)는 건드리지 않음)"""
@@ -594,128 +664,6 @@ class RealTimeVisualizer:
         # 로컬 환경에서만 pause 사용
         if not self.is_notebook:
             plt.pause(0.01)
-
-    def _display_frame_images(self, top_k_windows, is_final=False):
-        """
-        Top-K 윈도우의 프레임 이미지를 인터랙티브하게 표시
-        
-        Args:
-            top_k_windows: Top-K 윈도우 리스트
-            is_final: 최종 결과인지 여부
-        """
-        if not self.is_notebook or not self.video_processor:
-            return
-        
-        try:
-            # ipywidgets 기반 슬라이더 갤러리 (권장)
-            try:
-                import ipywidgets as widgets
-                from ipywidgets import IntSlider, VBox, HBox, Layout, Play, Button
-                from IPython.display import display
-                from io import BytesIO
-
-                gallery_widgets = []
-                title_text = "🎬 Top-K 프레임 갤러리 (슬라이더로 탐색)" if is_final else "🎬 Top-K 프레임 갤러리"
-                title = widgets.HTML(
-                    f"<h3 style='color:#E74C3C; margin-top:20px; border-top:2px solid #ddd; padding-top:20px;'>{title_text}</h3>"
-                )
-
-                for rank, window in enumerate(top_k_windows, 1):
-                    start_sec = float(window.get("start", 0))
-                    end_sec = float(window.get("end", 0))
-                    best_frame_idx = int(window.get("best_frame_idx", 0))
-                    q_frames = int(window.get("q_frames", 12))
-
-                    score = window.get("max_score", window.get("clip_score_norm", 0))
-                    final_score = window.get("final_score", score)
-                    ts = window.get("timestamp", f"{start_sec:.1f}s - {end_sec:.1f}s")
-
-                    window_key = f"{start_sec}_{end_sec}"
-                    if window_key not in self.current_frame_idx:
-                        self.current_frame_idx[window_key] = 0
-
-                    try:
-                        frames = self.video_processor.extract_window_frames(start_sec, end_sec, q_frames)
-                        if not frames:
-                            raise RuntimeError("no frames extracted")
-
-                        # PIL -> JPEG bytes list
-                        jpeg_bytes_list = []
-                        for f in frames:
-                            buf = BytesIO()
-                            f.save(buf, format="JPEG", quality=85)
-                            jpeg_bytes_list.append(buf.getvalue())
-
-                        best_idx = min(max(best_frame_idx, 0), len(jpeg_bytes_list) - 1)
-                        init_idx = 0  # "자연스럽게" 보기 위해 0부터 시작
-                        self.current_frame_idx[window_key] = init_idx
-
-                        header = widgets.HTML(
-                            f"<div style='margin: 8px 0;'><b>#{rank}</b> {ts} "
-                            f"| <b>score</b>: {final_score:.4f} "
-                            f"| <b>frames</b>: {len(jpeg_bytes_list)} "
-                            f"| <b>best</b>: {best_idx + 1}</div>"
-                        )
-
-                        play = Play(
-                            interval=160,  # ms
-                            value=init_idx,
-                            min=0,
-                            max=len(jpeg_bytes_list) - 1,
-                            step=1,
-                            description="Play",
-                            disabled=False,
-                        )
-
-                        slider = IntSlider(
-                            value=init_idx,
-                            min=0,
-                            max=len(jpeg_bytes_list) - 1,
-                            step=1,
-                            description=f"#{rank} frame",
-                            style={"description_width": "initial"},
-                            layout=Layout(width="520px"),
-                        )
-
-                        frame_label = widgets.HTML(f"<div>frame: <b>{init_idx + 1}</b> / {len(jpeg_bytes_list)}</div>")
-                        img_widget = widgets.Image(value=jpeg_bytes_list[init_idx], format="jpeg")
-                        img_widget.layout = Layout(max_width="640px", max_height="480px", border="2px solid #333")
-
-                        def _on_change(change, *, _key=window_key, _bytes=jpeg_bytes_list, _lbl=frame_label, _img=img_widget):
-                            new_idx = int(change["new"])
-                            self.current_frame_idx[_key] = new_idx
-                            _img.value = _bytes[new_idx]
-                            _lbl.value = f"<div>frame: <b>{new_idx + 1}</b> / {len(_bytes)}</div>"
-
-                        slider.observe(_on_change, names="value")
-                        widgets.jslink((play, "value"), (slider, "value"))
-
-                        jump_best_btn = Button(description="Jump best", button_style="info", layout=Layout(width="110px"))
-                        def _jump_best(_btn, *, _s=slider, _best=best_idx):
-                            _s.value = _best
-                        jump_best_btn.on_click(_jump_best)
-
-                        controls = HBox([play, slider, jump_best_btn], layout=Layout(align_items="center"))
-
-                        gallery_widgets.append(VBox([header, controls, frame_label, img_widget], layout=Layout(margin="12px 0")))
-                        del frames
-                    except Exception as e:
-                        gallery_widgets.append(
-                            widgets.HTML(
-                                f"<div style='padding:10px; border:1px solid #ddd; background:#fff3cd;'>"
-                                f"#{rank} 프레임 로드 실패: {e}</div>"
-                            )
-                        )
-
-                if gallery_widgets:
-                    display(VBox([title] + gallery_widgets))
-            except ImportError:
-                # ipywidgets가 없는 환경: 갤러리 스킵 (노트북이면 보통 설치되어 있음)
-                print("  [시각화] ipywidgets가 없어 Top-K 슬라이더 갤러리를 표시할 수 없습니다.")
-        except Exception as e:
-            print(f"  [시각화 경고] Top-K 프레임 갤러리 표시 실패: {e}")
-            import traceback
-            traceback.print_exc()
 
     def save_and_close(self, filename_base):
         """그래프를 이미지로 저장하고 창 닫기"""
@@ -1083,11 +1031,6 @@ class AdaptiveSearchEngine:
                 print(f"\n{'='*60}")
                 print(f"[📊 실시간 시각화 활성화] 진행 상황을 실시간으로 그래프에 표시합니다!")
                 print(f"{'='*60}\n")
-                
-                # 노트북 환경에서는 빈 그래프를 먼저 표시
-                if visualizer.is_notebook and visualizer.output_widget:
-                    with visualizer.output_widget:
-                        visualizer.display(visualizer.fig)
             except Exception as e:
                 print(f"시각화 초기화 실패: {e}. 시각화 없이 계속 진행합니다.")
                 import traceback
@@ -1101,6 +1044,11 @@ class AdaptiveSearchEngine:
         # 1. CLIP 기반 1차 검색 (Coarse-grained Search)
         window_idx = 0
         current_top_window = None
+        compact_window_log = True
+
+        def _overwrite_line(msg: str):
+            # 콘솔에서 한 줄 덮어쓰기 (요청하신 구간에만 사용)
+            print("\r" + msg.ljust(140), end="", flush=True)
         
         temp_thumb_dir = os.path.join(save_path, "temp_thumbs")
         if not os.path.exists(temp_thumb_dir):
@@ -1111,52 +1059,20 @@ class AdaptiveSearchEngine:
             end_time = min(current_time + p_sec, self.vp.duration)
             window_timestamp = f"{self.vp.get_timestamp_str(current_time)} - {self.vp.get_timestamp_str(end_time)}"
 
-            print(f"[Window {window_idx}/{total_windows}] 처리 중: {window_timestamp}")
+            if compact_window_log:
+                _overwrite_line(f"[Window {window_idx}/{total_windows}] {window_timestamp} | extracting...")
+            else:
+                print(f"[Window {window_idx}/{total_windows}] 처리 중: {window_timestamp}")
 
             # 프레임 추출 시간 측정
             frame_start = time.time()
-            frames = self.vp.extract_window_frames(current_time, end_time, q_frames, window_idx, total_windows)
-            # 디버깅: 프레임 추출 확인
-            if len(frames) > 0:
-                frame_arr = np.array(frames[0])
-                print(f"  [DEBUG] 첫 프레임 평균 픽셀값: {frame_arr.mean():.2f}, 표준편차: {frame_arr.std():.2f}")
+            # window_idx/total_windows를 넘기면 내부에서 매번 성공 로그가 찍혀서 지저분해짐 → 여기서는 생략
+            frames = self.vp.extract_window_frames(current_time, end_time, q_frames)
             frame_time = time.time() - frame_start
             total_frame_extraction_time += frame_time
 
-            # (실시간) 윈도우 내 프레임들을 시간순으로 프리뷰해서 "매끄럽게" 보여주기
-            processing_thumb_path = os.path.join(temp_thumb_dir, "_processing_current.jpg")
-            if visualizer and frames:
-                try:
-                    total_n = len(frames)
-                    max_preview = 16  # 너무 많이 갱신하면 무거워서 상한 둠
-
-                    # step_sec < p_sec이면 윈도우가 겹침:
-                    # 새로 "추가된" 구간은 윈도우의 뒷부분(step_sec 길이)이므로 tail 프레임만 프리뷰
-                    if step_sec < p_sec:
-                        n_new = int(total_n * (step_sec / p_sec))
-                        n_new = max(1, min(total_n, n_new))
-                        start_idx = max(0, total_n - n_new)
-                        candidate_indices = list(range(start_idx, total_n))
-                    else:
-                        candidate_indices = list(range(0, total_n))
-
-                    # candidate를 max_preview로 다운샘플
-                    if len(candidate_indices) > max_preview:
-                        stride = max(1, len(candidate_indices) // max_preview)
-                        preview_indices = candidate_indices[::stride]
-                        if preview_indices and preview_indices[-1] != candidate_indices[-1]:
-                            preview_indices.append(candidate_indices[-1])
-                    else:
-                        preview_indices = candidate_indices
-
-                    for i in preview_indices:
-                        frames[i].save(processing_thumb_path, "JPEG", quality=85)
-                        visualizer.show_processing_frame(
-                            processing_thumb_path,
-                            title=f"Processing frames: {window_timestamp}  ({i + 1}/{total_n})",
-                        )
-                except Exception as e:
-                    print(f"  [시각화 경고] 프레임 프리뷰 실패: {e}")
+            if compact_window_log:
+                _overwrite_line(f"[Window {window_idx}/{total_windows}] {window_timestamp} | extracting... {frame_time:.2f}s | clip...")
 
             # CLIP 추론 시간 측정
             clip_start = time.time()
@@ -1190,7 +1106,12 @@ class AdaptiveSearchEngine:
             clip_time = time.time() - clip_start
             total_clip_inference_time += clip_time
 
-            print(f"  -> 최대 CLIP 점수: {max_score:.4f} (프레임 추출: {frame_time:.2f}초, CLIP 추론: {clip_time:.2f}초)")
+            if compact_window_log:
+                _overwrite_line(
+                    f"[Window {window_idx}/{total_windows}] {window_timestamp} | frame {frame_time:.2f}s | clip {clip_time:.2f}s | score {max_score:.4f}"
+                )
+            else:
+                print(f"  -> 최대 CLIP 점수: {max_score:.4f} (프레임 추출: {frame_time:.2f}초, CLIP 추론: {clip_time:.2f}초)")
 
             # 가장 높은 점수를 가진 프레임을 썸네일로 저장
             best_frame_img = frames[best_frame_idx]
@@ -1217,26 +1138,30 @@ class AdaptiveSearchEngine:
             # 현재까지 최고 점수 윈도우 추적
             if current_top_window is None or max_score > current_top_window['max_score']:
                 current_top_window = window_data
+                # 덮어쓰기 로그를 끊고, 중요한 이벤트만 줄바꿈해서 남김
+                if compact_window_log:
+                    print()
                 print(f"  ⭐ 새로운 Top 윈도우 발견! ({current_top_window['timestamp']})\n")
             else:
-                print(f"  [현재 Top] {current_top_window['timestamp']} (점수: {current_top_window['max_score']:.4f})\n")
+                if not compact_window_log:
+                    print(f"  [현재 Top] {current_top_window['timestamp']} (점수: {current_top_window['max_score']:.4f})\n")
 
             # 실시간 시각화 업데이트
             if visualizer:
                 try:
-                    # 프리뷰가 성공하면 processing_thumb_path를, 아니면 best thumb을 사용
-                    vis_thumb = processing_thumb_path if os.path.exists(processing_thumb_path) else thumb_path
                     visualizer.update({
                         'start': current_time,
                         'end': end_time,
                         'clip_score_norm': max_score,  # 시각화에는 max_score 사용
-                        'thumb_path': vis_thumb,
                         'timestamp': window_data['timestamp'],
                     })
                 except Exception as e:
                     print(f"  [시각화 경고] 업데이트 실패: {e}")
 
             current_time += step_size
+
+        if compact_window_log:
+            print()  # 마지막 덮어쓰기 줄 정리
 
         # CLIP 점수 기준 상위 K개 선별
         print(f"\n{'='*60}")
