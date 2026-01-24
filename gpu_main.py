@@ -186,8 +186,10 @@ class VideoProcessor:
 
     def extract_window_frames(self, start_sec, end_sec, num_samples_q, window_idx=None, total_windows=None):
         """
-        특정 구간에서 q개의 프레임을 순차적으로 추출하여 (224, 224)로 리사이징
-        
+        특정 구간에서 q개의 프레임을 순차적으로 추출
+        - 1920x1080 이하: 원본 해상도 유지 (프로세서가 리사이징)
+        - 1920x1080 초과: 메모리 보호를 위해 1080p로 다운스케일
+
         Args:
             start_sec: 시작 시간 (초)
             end_sec: 종료 시간 (초)
@@ -217,17 +219,22 @@ class VideoProcessor:
                     # frame_data['data']는 [C, H, W] 텐서
                     img_tensor = frame_data['data'] # uint8 텐서
                     
-                    # 3. 즉시 리사이징 (메모리 절약의 핵심)
-                    # PIL로 변환하기 전에 텐서 상태에서 (224, 224)로 축소
-                    resized_tensor = F.resize(img_tensor, [224, 224], antialias=True)
+                    _, h, w = img_tensor.shape
+                    # 너무 큰 화질만 리사이징 
+                    if min(h, w) > 1080:
+                        # 비율 유지하며 긴 변을 1080으로 맞춤 (메모리 보호용)
+                        scale = 1080 / max(h, w)
+                        new_h, new_w = int(h * scale), int(w * scale)
+                        resized_tensor = F.resize(img_tensor, [new_h, new_w], antialias=True)
+                        del img_tensor  # 원본 명시적 삭제
+                        img_tensor = resized_tensor
                     
-                    # PIL 이미지로 변환 (CLIP 모델 입력 규격)
-                    img = Image.fromarray(resized_tensor.permute(1, 2, 0).byte().cpu().numpy())
+                    # 텐서를 바로 PIL로 변환 (원본 해상도 유지)
+                    img = Image.fromarray(img_tensor.permute(1, 2, 0).byte().cpu().numpy())
                     frames.append(img)
                     
                     # 사용 중인 중간 텐서 명시적 삭제
                     del img_tensor
-                    del resized_tensor
                     
             except StopIteration:
                 print(f"  ⚠️ [{current_pos:.1f}s] 영상의 끝에 도달했습니다.")
