@@ -124,17 +124,59 @@ class ModelManager:
             cosine_sim = torch.matmul(image_embeds, text_embeds.T)
         return cosine_sim.cpu().numpy()
 
-    def generate_caption(self, image: Image.Image) -> str:
-        """Generates caption using BLIP-2"""
+    def generate_caption(self, image: Image.Image, prompt: str = None) -> str:
+        """
+        Generates caption using BLIP-2 with optional prompt
+        
+        Args:
+            image: PIL Image
+            prompt: 힌트로 사용할 쿼리 (선택)
+        
+        Returns:
+            생성된 캡션
+        """
         if not self.use_blip:
             return ""
-        inputs = self.blip_processor(images=image, return_tensors="pt").to(self.device, torch.float16)
-        generated_ids = self.blip_model.generate(**inputs)
-        return self.blip_processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
+        
+        if prompt:
+            # 프롬프트를 "힌트"로 활용하는 instruction 생성
+            # BLIP-2는 영어 instruction이 더 효과적
+            instruction = f"Based on the hint '{prompt}', this image shows"
+            inputs = self.blip_processor(images=image, text=instruction, return_tensors="pt").to(self.device, torch.float16)
+        else:
+            # 기존 방식 (프롬프트 없음)
+            inputs = self.blip_processor(images=image, return_tensors="pt").to(self.device, torch.float16)
+        
+        generated_ids = self.blip_model.generate(
+            **inputs, 
+            max_new_tokens=40, # 너무 길면 헛소리 할 수 있음
+            min_length=10,
+            num_beams=5,       # Beam Search로 퀄리티 향상
+            no_repeat_ngram_size=3,   # 3단어 이상 반복되면 강제로 차단 (강력 추천)
+            repetition_penalty=1.2,   # 1.5는 너무 높으니 1.1~1.2 정도로 완화
+            early_stopping=True       # 문장이 완성되면 일찍 끝냄
+        )
+        
+        # 반환 값에는 제공한 프롬프트가 있으면 안 됨 
+        raw_answer = self.blip_processor.batch_decode(generated_ids, skip_special_tokens=True)[0].strip()
+        # "detail:" 이후의 텍스트만 포함해야 함 (문장 분리 후 첫 번째 문장)
+        search_str = ", this image shows"
+        detail_start = raw_answer.find(search_str)
+        if detail_start != -1:
+            modified_answer = raw_answer[detail_start + len(search_str):].strip()
+        else:
+            modified_answer = raw_answer
+        return modified_answer.strip()
 
     def get_text_features(self, text_list: List[str]):
         """텍스트를 CLIP 벡터로 변환 (텍스트 간 유사도 비교용)"""
-        inputs = self.clip_processor(text=text_list, return_tensors="pt", padding=True).to(self.device)
+        inputs = self.clip_processor(
+            text=text_list, 
+            return_tensors="pt", 
+            padding=True,
+            truncation=True,
+            max_length=77
+        ).to(self.device)
         with torch.no_grad():
             text_features = self.clip_model.get_text_features(**inputs)
         return text_features / text_features.norm(dim=-1, keepdim=True)
@@ -186,8 +228,15 @@ class VideoProcessor:
 
     def extract_window_frames(self, start_sec, end_sec, num_samples_q, window_idx=None, total_windows=None):
         """
-        특정 구간에서 q개의 프레임을 순차적으로 추출하여 (224, 224)로 리사이징
+        특정 구간에서 q개의 프레임을 순차적으로 추출
+        - 1920x1080 이하: 원본 해상도 유지 (프로세서가 리사이징)
+        - 1920x1080 초과: 메모리 보호를 위해 1080p로 다운스케일
         
+        NOTE:
+        기존 구현(각 샘플마다 seek 후 next 1장)은 비디오 인코딩/키프레임 간격/시간 해상도에 따라
+        동일 프레임이 반복되는 현상이 발생할 수 있습니다.
+        이를 방지하기 위해 start~end 구간을 한 번 seek 후 순차 디코딩하여 샘플링합니다.
+
         Args:
             start_sec: 시작 시간 (초)
             end_sec: 종료 시간 (초)
@@ -195,47 +244,88 @@ class VideoProcessor:
             window_idx: 현재 윈도우 인덱스 (로깅용, optional)
             total_windows: 전체 윈도우 수 (로깅용, optional)
         """
-        frames = []
-        # 구간 내 균등 간격 계산
-        duration = end_sec - start_sec
-        step = duration / max(1, (num_samples_q - 1))
-        
-        for i in range(num_samples_q):
-            current_pos = start_sec + (i * step)
-            
-            # 2. 정밀 탐색 (Seek)
-            self.v_reader.seek(current_pos)
-            
-            try:
-                # 다음 프레임 한 장 읽기
+        frames: list[Image.Image] = []
+        if num_samples_q <= 0:
+            return frames
+
+        start_sec = float(start_sec)
+        end_sec = float(end_sec)
+        if end_sec <= start_sec:
+            return frames
+
+        # 1) 구간을 순차 디코딩으로 모은 뒤 샘플링
+        decoded: list[Image.Image] = []
+        eps = 1e-3
+
+        # start로 정확히 seek (가능하면 keyframes_only=False)
+        try:
+            self.v_reader.seek(start_sec, keyframes_only=False)
+        except TypeError:
+            self.v_reader.seek(start_sec)
+        except Exception as e:
+            print(f"  ❌ seek 실패: {e}")
+            return frames
+
+        # window 길이에 비례해 최대 디코딩 프레임 수 제한 (무한 루프 방지)
+        approx_frames_in_window = int(np.ceil((end_sec - start_sec) * float(self.fps))) if self.fps else 0
+        max_decode = max(approx_frames_in_window + 10, num_samples_q + 2, 32)
+
+        try:
+            while len(decoded) < max_decode:
                 frame_data = next(self.v_reader)
-                
-                if frame_data is not None:
-                    if i == 0 and window_idx is not None:
-                        print(f"  ✅ [Window {window_idx}/{total_windows}] [{start_sec:.1f}s] 첫 프레임 읽기 성공!")
-                    
-                    # frame_data['data']는 [C, H, W] 텐서
-                    img_tensor = frame_data['data'] # uint8 텐서
-                    
-                    # 3. 즉시 리사이징 (메모리 절약의 핵심)
-                    # PIL로 변환하기 전에 텐서 상태에서 (224, 224)로 축소
-                    resized_tensor = F.resize(img_tensor, [224, 224], antialias=True)
-                    
-                    # PIL 이미지로 변환 (CLIP 모델 입력 규격)
-                    img = Image.fromarray(resized_tensor.permute(1, 2, 0).byte().cpu().numpy())
-                    frames.append(img)
-                    
-                    # 사용 중인 중간 텐서 명시적 삭제
+                if frame_data is None:
+                    continue
+
+                pts = frame_data.get("pts", None)
+                if pts is not None:
+                    try:
+                        pts_f = float(pts)
+                    except Exception:
+                        pts_f = None
+
+                    if pts_f is not None:
+                        if pts_f < start_sec - eps:
+                            continue
+                        if pts_f > end_sec + eps:
+                            break
+
+                # frame_data['data']는 [C, H, W] uint8 텐서
+                img_tensor = frame_data["data"]
+                _, h, w = img_tensor.shape
+
+                # 너무 큰 화질만 리사이징
+                if min(h, w) > 1080:
+                    scale = 1080 / max(h, w)
+                    new_h, new_w = int(h * scale), int(w * scale)
+                    resized_tensor = F.resize(img_tensor, [new_h, new_w], antialias=True)
                     del img_tensor
-                    del resized_tensor
-                    
-            except StopIteration:
-                print(f"  ⚠️ [{current_pos:.1f}s] 영상의 끝에 도달했습니다.")
-                break
-            except Exception as e:
-                print(f"  ❌ 프레임 추출 중 에러 발생: {e}")
-                continue
-        
+                    img_tensor = resized_tensor
+
+                img = Image.fromarray(img_tensor.permute(1, 2, 0).byte().cpu().numpy())
+                decoded.append(img)
+                del img_tensor
+
+                if len(decoded) == 1 and window_idx is not None:
+                    print(f"  ✅ [Window {window_idx}/{total_windows}] [{start_sec:.1f}s] 첫 프레임 디코딩 성공!")
+
+        except StopIteration:
+            pass
+        except Exception as e:
+            print(f"  ❌ 프레임 디코딩 중 에러 발생: {e}")
+
+        if not decoded:
+            print(f"  ⚠️ [{start_sec:.1f}s-{end_sec:.1f}s] 구간에서 디코딩된 프레임이 없습니다.")
+            return frames
+
+        # 2) 디코딩된 프레임들에서 q개 균등 샘플링
+        L = len(decoded)
+        if num_samples_q >= L:
+            # 부족하면 마지막 프레임 반복 (불가피)
+            frames = decoded + [decoded[-1]] * (num_samples_q - L)
+        else:
+            idxs = np.linspace(0, L - 1, num_samples_q, dtype=int)
+            frames = [decoded[i] for i in idxs.tolist()]
+
         return frames
 
     @staticmethod
@@ -259,7 +349,7 @@ class VideoProcessor:
 # 3. Real-time Visualization
 # ==========================================
 class RealTimeVisualizer:
-    def __init__(self, total_duration, k_top, save_path="results"):
+    def __init__(self, total_duration, k_top, save_path="results", video_processor=None):
         """
         실시간 시각화를 위한 클래스
 
@@ -267,37 +357,167 @@ class RealTimeVisualizer:
             total_duration: 비디오 총 길이 (초)
             k_top: Top-K 개수
             save_path: 그래프 이미지 저장 경로
+            video_processor: VideoProcessor 인스턴스 (비디오 재생용)
         """
         self.total_duration = total_duration
         self.k_top = k_top
         self.save_path = save_path
+        self.video_processor = video_processor
+        self.video_path = getattr(video_processor, "video_path", None)
         self.window_data = []
         self.current_top_k = []
         self.is_complete = False
         self.save_filename = None
 
+        # 노트북 UI 핸들 (있는 경우에만)
+        self.widgets = None
+        self.display = None
+        self.clear_output = None
+        self.Video = None
+        self.HTML = None
+        self.container = None
+        self.video_out = None
+        self.controls_out = None
+        self.plot_out = None
+        self.replay_button = None
+
         # 환경 감지 (Colab/Kaggle vs 로컬)
         self.is_notebook = self._is_notebook_environment()
         
         if self.is_notebook:
-            # Colab/Kaggle: IPython display 사용
+            # Colab/Kaggle: 비디오(상단) + 그래프(하단) 출력 분리 (다른 로그 보호)
             try:
-                from IPython.display import display, clear_output
+                from IPython.display import display, clear_output, Video, HTML
+                import ipywidgets as widgets
+
                 self.display = display
                 self.clear_output = clear_output
-                print("📊 [Notebook 환경] IPython display 모드로 시각화")
+                self.Video = Video
+                self.HTML = HTML
+                self.widgets = widgets
+
+                self.video_out = widgets.Output()
+                self.controls_out = widgets.Output()
+                self.plot_out = widgets.Output()
+                self.container = widgets.VBox([self.video_out, self.controls_out, self.plot_out])
+                display(self.container)
+
+                self._render_video(autoplay=True, loop=True)
+                self._render_controls()
+                print("📊 [Notebook 환경] 비디오(상단) + 그래프(하단) 분리 시각화")
             except ImportError:
-                print("⚠️ IPython을 찾을 수 없습니다. 시각화를 비활성화합니다.")
+                print("⚠️ IPython/ipywidgets를 찾을 수 없습니다. 시각화를 비활성화합니다.")
                 self.is_notebook = False
         else:
             # 로컬: Interactive mode
             print("📊 [로컬 환경] Interactive 모드로 시각화")
             plt.ion()
 
-        # 그래프 설정
-        self.fig, self.ax = plt.subplots(figsize=(14, 6))
+        # 그래프 Figure 설정
+        self.fig, self.ax_plot = plt.subplots(figsize=(14, 6))
         self.fig.suptitle('Real-time Video Search Similarity Scores', fontsize=14, fontweight='bold')
-    
+        if self.is_notebook and self.plot_out:
+            with self.plot_out:
+                self.display(self.fig)
+
+    def _render_video(self, autoplay: bool = False, loop: bool = False):
+        """노트북 상단에 비디오 플레이어를 렌더링"""
+        if not (self.is_notebook and self.video_out and self.display and self.HTML):
+            return
+
+        with self.video_out:
+            self.clear_output(wait=True)
+            if not self.video_path or not os.path.exists(self.video_path):
+                self.display(self.HTML("<div style='padding:8px; background:#fff3cd; border:1px solid #ddd;'>비디오 파일을 찾을 수 없습니다.</div>"))
+                return
+
+            try:
+                size = os.path.getsize(self.video_path)
+            except Exception:
+                size = None
+
+            # 너무 큰 파일은 base64 embed가 무거움 → 작은 파일만 data-uri embed
+            embed = bool(size is not None and size <= 25 * 1024 * 1024)
+
+            attrs = ["controls"]
+            if autoplay:
+                attrs.append("autoplay")
+            if loop:
+                attrs.append("loop")
+            html_attrs = " ".join(attrs)
+
+            video_id = "rtv_video"
+
+            if embed:
+                import base64
+                with open(self.video_path, "rb") as f:
+                    b64 = base64.b64encode(f.read()).decode("ascii")
+                src = f"data:video/mp4;base64,{b64}"
+            else:
+                # NOTE: 환경에 따라 로컬 파일 src가 안 먹을 수 있음 (Colab은 보통 embed 권장)
+                src = os.path.basename(self.video_path)
+
+            self.display(self.HTML(
+                f"""
+                <div style="margin:8px 0;">
+                  <video id="{video_id}" {html_attrs} style="max-width:100%; border:1px solid #ddd; border-radius:6px;">
+                    <source src="{src}" type="video/mp4">
+                  </video>
+                </div>
+                """
+            ))
+
+    def _render_controls(self, top_k: list | None = None):
+        """노트북 상단 컨트롤(Replay + Jump Top-K) 렌더링"""
+        if not (self.is_notebook and self.controls_out and self.display and self.HTML):
+            return
+
+        with self.controls_out:
+            self.clear_output(wait=True)
+            # JS helpers + buttons (ipywidgets 없이 HTML로 처리: Colab/Jupyter에서 더 안정적)
+            buttons_html = []
+
+            buttons_html.append("""
+            <script>
+              function rtvVideo() { return document.getElementById('rtv_video'); }
+              function rtvSeek(t) {
+                var v = rtvVideo();
+                if (!v) { console.log('rtv_video not found'); return; }
+                v.currentTime = t;
+                var p = v.play();
+                if (p && p.catch) { p.catch(()=>{}); }
+              }
+              function rtvReplay() { rtvSeek(0); }
+            </script>
+            """)
+
+            buttons_html.append("""
+            <div style="display:flex; flex-wrap:wrap; gap:8px; align-items:center; margin:8px 0;">
+              <button onclick="rtvReplay()"
+                style="padding:8px 12px; background:#1f77b4; color:white; border:0; border-radius:6px; cursor:pointer;">
+                Replay
+              </button>
+            """)
+
+            if top_k:
+                for i, w in enumerate(top_k, 1):
+                    try:
+                        s = float(w.get("start", 0.0))
+                    except Exception:
+                        s = 0.0
+                    label = w.get("timestamp", f"{s:.1f}s")
+                    buttons_html.append(
+                        f"""
+                        <button onclick="rtvSeek({s})"
+                          style="padding:8px 12px; background:#2ca02c; color:white; border:0; border-radius:6px; cursor:pointer;">
+                          Jump Top {i} ({label})
+                        </button>
+                        """
+                    )
+
+            buttons_html.append("</div>")
+            self.display(self.HTML("\n".join(buttons_html)))
+
     def _is_notebook_environment(self):
         """
         현재 환경이 Jupyter/Colab/Kaggle 노트북인지 확인
@@ -344,12 +564,13 @@ class RealTimeVisualizer:
         sorted_windows = sorted(self.window_data, key=lambda x: x['clip_score_norm'], reverse=True)
         self.current_top_k = sorted_windows[:self.k_top]
 
-        self._draw()
+        self._draw_plot_only()
         
-        # 노트북 환경에서는 명시적으로 display
-        if self.is_notebook:
-            self.clear_output(wait=True)
-            self.display(self.fig)
+        # 노트북 환경에서는 별도 출력 영역에만 표시 (다른 로그 보호)
+        if self.is_notebook and self.plot_out:
+            with self.plot_out:
+                self.clear_output(wait=True)
+                self.display(self.fig)
 
     def finalize(self, final_top_k):
         """
@@ -360,75 +581,81 @@ class RealTimeVisualizer:
         """
         self.is_complete = True
         self.final_top_k = final_top_k
-        self._draw()
+        self._draw_plot_only()
         
-        # 노트북 환경에서는 명시적으로 display
-        if self.is_notebook:
-            self.clear_output(wait=True)
-            self.display(self.fig)
+        # 노트북 환경에서는 별도 출력 영역에만 표시 (다른 로그 보호)
+        if self.is_notebook and self.plot_out:
+            with self.plot_out:
+                self.clear_output(wait=True)
+                self.display(self.fig)
 
-    def _draw(self):
-        """그래프 그리기"""
-        self.ax.clear()
+        # 끝나면 Jump Top-K 버튼까지 포함해서 컨트롤 갱신
+        if self.is_notebook and self.controls_out:
+            self._render_controls(top_k=final_top_k)
 
+    def _draw_plot_only(self):
+        """그래프(ax_plot)만 그리기 (상단 이미지(ax_img)는 건드리지 않음)"""
         if not self.window_data:
             return
+
+        ax = self.ax_plot
+        ax.clear()
 
         # 시간축과 점수 데이터 준비
         times = [(w['start'] + w['end']) / 2 for w in self.window_data]
         scores = [w['clip_score_norm'] for w in self.window_data]
 
         # 1. 기본 점수 선 그래프 (회색)
-        self.ax.plot(times, scores, color='#CCCCCC', linewidth=1, alpha=0.6, zorder=1)
+        ax.plot(times, scores, color='#CCCCCC', linewidth=1, alpha=0.6, zorder=1)
 
         # 2. 모든 윈도우 점 (작은 파란색)
-        self.ax.scatter(times, scores, color='#4A90E2', s=30, alpha=0.5, zorder=2)
+        ax.scatter(times, scores, color='#4A90E2', s=30, alpha=0.5, zorder=2)
 
         # 3. 현재 Top-K 후보 (노란색 큰 점)
         if not self.is_complete:
             top_k_times = [(w['start'] + w['end']) / 2 for w in self.current_top_k]
             top_k_scores = [w['clip_score_norm'] for w in self.current_top_k]
-            self.ax.scatter(top_k_times, top_k_scores, color='#FFD700', s=200,
+            ax.scatter(top_k_times, top_k_scores, color='#FFD700', s=200,
                           edgecolors='#FFA500', linewidths=2, zorder=4,
                           label=f'Current Top-{self.k_top}', marker='o', alpha=0.9)
 
             # 반짝이는 효과를 위한 외곽선
             for t, s in zip(top_k_times, top_k_scores):
                 circle = Circle((t, s), radius=0.3, color='#FFD700', alpha=0.3, zorder=3)
-                self.ax.add_patch(circle)
+                ax.add_patch(circle)
 
         # 4. 최종 Top-K (빨간색 큰 점)
         if self.is_complete:
             final_times = [(w['start'] + w['end']) / 2 for w in self.final_top_k]
             # max_score 또는 clip_score_norm 키 사용 (하위 호환성)
             final_scores = [w.get('max_score', w.get('clip_score_norm', 0)) for w in self.final_top_k]
-            self.ax.scatter(final_times, final_scores, color='#E74C3C', s=250,
+            ax.scatter(final_times, final_scores, color='#E74C3C', s=250,
                           edgecolors='#C0392B', linewidths=3, zorder=5,
                           label=f'Final Top-{self.k_top}', marker='*', alpha=1.0)
 
             # 순위 표시
             for idx, (t, s, w) in enumerate(zip(final_times, final_scores, self.final_top_k), 1):
-                self.ax.annotate(f'#{idx}', xy=(t, s), xytext=(5, 5),
+                ax.annotate(f'#{idx}', xy=(t, s), xytext=(5, 5),
                                textcoords='offset points', fontsize=10,
                                fontweight='bold', color='#E74C3C',
                                bbox=dict(boxstyle='round,pad=0.3', facecolor='white', edgecolor='#E74C3C', alpha=0.8))
 
         # 그래프 설정
-        self.ax.set_xlabel('Video Time (seconds)', fontsize=11, fontweight='bold')
-        self.ax.set_ylabel('Maximum Similarity Score', fontsize=11, fontweight='bold')
-        self.ax.set_xlim(0, self.total_duration)
+        ax.set_xlabel('Video Time (seconds)', fontsize=11, fontweight='bold')
+        ax.set_ylabel('Maximum Similarity Score', fontsize=11, fontweight='bold')
+        ax.set_xlim(0, self.total_duration)
         # y축 범위를 동적으로 설정 (0-1 범위 또는 데이터에 맞게)
         if self.window_data:
             max_score_in_data = max([w['clip_score_norm'] for w in self.window_data])
-            self.ax.set_ylim(0, min(1.1, max_score_in_data * 1.1))  # 약간 여유 추가
-        self.ax.grid(True, alpha=0.3, linestyle='--')
-        self.ax.legend(loc='upper right', fontsize=9)
+            ax.set_ylim(0, min(1.1, max_score_in_data * 1.1))  # 약간 여유 추가
+        ax.grid(True, alpha=0.3, linestyle='--')
+        ax.legend(loc='upper right', fontsize=9)
 
         # 진행률 표시
         if self.window_data:
             progress = (self.window_data[-1]['end'] / self.total_duration) * 100
             status = "COMPLETE ✓" if self.is_complete else f"Processing... {progress:.1f}%"
-            self.ax.text(0.02, 0.98, status, transform=self.ax.transAxes,
+            ax.text(0.02, 0.98, status, transform=ax.transAxes,
                        fontsize=11, fontweight='bold', verticalalignment='top',
                        bbox=dict(boxstyle='round', facecolor='white', alpha=0.8))
 
@@ -714,39 +941,37 @@ class AdaptiveSearchEngine:
 
     def calculate_sequential_score(self, frames, sub_queries):
         """
-        [변곡점 탐지 로직]
-        쿼리가 A -> B로 나뉘었을 때, 프레임 시퀀스 내에서 최적의 분할 지점을 찾아
-        (A유사도 + B유사도)가 최대가 되는 점수를 반환합니다.
-        Returns: (max_score, scores_matrix, best_split_index)
+        [시퀀셜 쿼리 점수 계산]
+        쿼리가 A -> B로 나뉘었을 때, 각 쿼리에 대해 가장 높은 점수를 가진 프레임을 찾습니다.
+        
+        Returns: (max_score, scores_matrix, front_frame_idx, back_frame_idx)
+            - max_score: front와 back의 평균 점수
+            - scores_matrix: (q_frames, 2_sub_queries) 점수 행렬
+            - front_frame_idx: 쿼리 0(앞부분)에 대해 최고 점수 프레임 인덱스
+            - back_frame_idx: 쿼리 1(뒷부분)에 대해 최고 점수 프레임 인덱스
         """
         # (q_frames, 2_sub_queries) matrix
         scores_matrix = self.mm.get_clip_scores(frames, sub_queries)
-        q_len = len(frames)
-        max_score = -1.0
-        best_split = -1
-
-        # Linear Scan to find Change Point
-        # 최소 10% 지점부터 90% 지점 사이에서 분할 시도
-        start_idx = int(q_len * 0.1)
-        end_idx = int(q_len * 0.9)
 
         if len(sub_queries) == 2:
-            score_A = scores_matrix[:, 0] # Similarity curve for Query A
-            score_B = scores_matrix[:, 1] # Similarity curve for Query B
+            score_A = scores_matrix[:, 0]  # Similarity curve for Query A (앞부분)
+            score_B = scores_matrix[:, 1]  # Similarity curve for Query B (뒷부분)
 
-            for t in range(start_idx, end_idx):
-                # t 시점까지는 A, t 이후는 B
-                avg_A = np.mean(score_A[:t])
-                avg_B = np.mean(score_B[t:])
-                combined_score = (avg_A + avg_B) / 2
-
-                if combined_score > max_score:
-                    max_score = combined_score
-                    best_split = t
+            # 각 쿼리에 대해 가장 높은 점수를 가진 프레임 찾기
+            front_frame_idx = int(np.argmax(score_A))
+            back_frame_idx = int(np.argmax(score_B))
+            
+            # 두 프레임의 점수 평균을 max_score로 사용
+            front_score = float(score_A[front_frame_idx])
+            back_score = float(score_B[back_frame_idx])
+            max_score = (front_score + back_score) / 2.0
+            
+            return float(max_score), scores_matrix, front_frame_idx, back_frame_idx
         else:
+            # 단일 쿼리인 경우 (fallback)
             max_score = np.mean(np.max(scores_matrix, axis=1))
-
-        return float(max_score), scores_matrix, best_split
+            best_idx = int(np.argmax(np.max(scores_matrix, axis=1)))
+            return float(max_score), scores_matrix, best_idx, best_idx
 
     def normalize_score(self, raw_score: float) -> float:
         """
@@ -802,16 +1027,14 @@ class AdaptiveSearchEngine:
         visualizer = None
         if enable_visualization:
             try:
-                visualizer = RealTimeVisualizer(self.vp.duration, k_top, save_path)
+                visualizer = RealTimeVisualizer(self.vp.duration, k_top, save_path, video_processor=self.vp)
                 print(f"\n{'='*60}")
                 print(f"[📊 실시간 시각화 활성화] 진행 상황을 실시간으로 그래프에 표시합니다!")
                 print(f"{'='*60}\n")
-                
-                # 노트북 환경에서는 빈 그래프를 먼저 표시
-                if visualizer.is_notebook:
-                    visualizer.display(visualizer.fig)
             except Exception as e:
                 print(f"시각화 초기화 실패: {e}. 시각화 없이 계속 진행합니다.")
+                import traceback
+                traceback.print_exc()
                 visualizer = None
 
         print(f"\n{'='*60}")
@@ -821,6 +1044,11 @@ class AdaptiveSearchEngine:
         # 1. CLIP 기반 1차 검색 (Coarse-grained Search)
         window_idx = 0
         current_top_window = None
+        compact_window_log = True
+
+        def _overwrite_line(msg: str):
+            # 콘솔에서 한 줄 덮어쓰기 (요청하신 구간에만 사용)
+            print("\r" + msg.ljust(140), end="", flush=True)
         
         temp_thumb_dir = os.path.join(save_path, "temp_thumbs")
         if not os.path.exists(temp_thumb_dir):
@@ -829,34 +1057,39 @@ class AdaptiveSearchEngine:
         while current_time < self.vp.duration:
             window_idx += 1
             end_time = min(current_time + p_sec, self.vp.duration)
+            window_timestamp = f"{self.vp.get_timestamp_str(current_time)} - {self.vp.get_timestamp_str(end_time)}"
 
-            print(f"[Window {window_idx}/{total_windows}] 처리 중: {self.vp.get_timestamp_str(current_time)} - {self.vp.get_timestamp_str(end_time)}")
+            if compact_window_log:
+                _overwrite_line(f"[Window {window_idx}/{total_windows}] {window_timestamp} | extracting...")
+            else:
+                print(f"[Window {window_idx}/{total_windows}] 처리 중: {window_timestamp}")
 
             # 프레임 추출 시간 측정
             frame_start = time.time()
-            frames = self.vp.extract_window_frames(current_time, end_time, q_frames, window_idx, total_windows)
-            # 디버깅: 프레임 추출 확인
-            if len(frames) > 0:
-                frame_arr = np.array(frames[0])
-                print(f"  [DEBUG] 첫 프레임 평균 픽셀값: {frame_arr.mean():.2f}, 표준편차: {frame_arr.std():.2f}")
+            # window_idx/total_windows를 넘기면 내부에서 매번 성공 로그가 찍혀서 지저분해짐 → 여기서는 생략
+            frames = self.vp.extract_window_frames(current_time, end_time, q_frames)
             frame_time = time.time() - frame_start
             total_frame_extraction_time += frame_time
+
+            if compact_window_log:
+                _overwrite_line(f"[Window {window_idx}/{total_windows}] {window_timestamp} | extracting... {frame_time:.2f}s | clip...")
 
             # CLIP 추론 시간 측정
             clip_start = time.time()
             if is_sequential:
-                # 시퀀셜: calculate_sequential_score가 반환하는 max_score 사용
-                max_score, scores_matrix, best_split = self.calculate_sequential_score(frames, sub_queries)
+                # 시퀀셜: calculate_sequential_score가 반환하는 max_score와 인덱스들 사용
+                max_score, scores_matrix, front_frame_idx, back_frame_idx = self.calculate_sequential_score(frames, sub_queries)
+                
                 # 각 프레임별 점수 저장 (시퀀셜의 경우 두 쿼리에 대한 점수)
                 frame_scores = {
                     f"query_{i}": scores_matrix[:, i].tolist()
                     for i in range(len(sub_queries))
                 }
-                frame_scores["best_split_index"] = int(best_split) if best_split != -1 else None
+                frame_scores["front_frame_idx"] = front_frame_idx  # 쿼리 0의 최고 점수 프레임
+                frame_scores["back_frame_idx"] = back_frame_idx    # 쿼리 1의 최고 점수 프레임
                 
-                # 시퀀셜: 가장 높은 점수를 가진 프레임 찾기 (각 쿼리별 최대값의 평균)
-                max_scores_per_query = np.max(scores_matrix, axis=0)  # 각 쿼리별 최대 점수
-                best_frame_idx = int(np.argmax(np.mean(scores_matrix, axis=1)))  # 평균이 가장 높은 프레임
+                # 썸네일은 front_frame (앞부분 쿼리의 최고 점수 프레임) 사용
+                best_frame_idx = front_frame_idx
             else:
                 # 비시퀀셜: 각 프레임의 최대 점수 사용
                 raw_scores_matrix = self.mm.get_clip_scores(frames, sub_queries)
@@ -873,7 +1106,12 @@ class AdaptiveSearchEngine:
             clip_time = time.time() - clip_start
             total_clip_inference_time += clip_time
 
-            print(f"  -> 최대 CLIP 점수: {max_score:.4f} (프레임 추출: {frame_time:.2f}초, CLIP 추론: {clip_time:.2f}초)")
+            if compact_window_log:
+                _overwrite_line(
+                    f"[Window {window_idx}/{total_windows}] {window_timestamp} | frame {frame_time:.2f}s | clip {clip_time:.2f}s | score {max_score:.4f}"
+                )
+            else:
+                print(f"  -> 최대 CLIP 점수: {max_score:.4f} (프레임 추출: {frame_time:.2f}초, CLIP 추론: {clip_time:.2f}초)")
 
             # 가장 높은 점수를 가진 프레임을 썸네일로 저장
             best_frame_img = frames[best_frame_idx]
@@ -884,12 +1122,13 @@ class AdaptiveSearchEngine:
             window_data = {
                 "start": current_time,
                 "end": end_time,
-                "timestamp": f"{self.vp.get_timestamp_str(current_time)} - {self.vp.get_timestamp_str(end_time)}",
+                "timestamp": window_timestamp,
                 "max_score": max_score,           # 최대 점수 (정규화 안 함)
                 "best_frame_idx": best_frame_idx,  # 최고 점수 프레임 인덱스
                 "frame_scores": frame_scores,  # 프레임별 점수 추가
                 "temp_img_path": thumb_path,  # 경로만 저장 (RAM 소모 0)
                 "is_sequential": is_sequential,  # 시퀀셜 여부 저장
+                "q_frames": q_frames,  # 프레임 갤러리 표시용
             }
             all_windows.append(window_data)
             
@@ -899,9 +1138,13 @@ class AdaptiveSearchEngine:
             # 현재까지 최고 점수 윈도우 추적
             if current_top_window is None or max_score > current_top_window['max_score']:
                 current_top_window = window_data
+                # 덮어쓰기 로그를 끊고, 중요한 이벤트만 줄바꿈해서 남김
+                if compact_window_log:
+                    print()
                 print(f"  ⭐ 새로운 Top 윈도우 발견! ({current_top_window['timestamp']})\n")
             else:
-                print(f"  [현재 Top] {current_top_window['timestamp']} (점수: {current_top_window['max_score']:.4f})\n")
+                if not compact_window_log:
+                    print(f"  [현재 Top] {current_top_window['timestamp']} (점수: {current_top_window['max_score']:.4f})\n")
 
             # 실시간 시각화 업데이트
             if visualizer:
@@ -909,12 +1152,16 @@ class AdaptiveSearchEngine:
                     visualizer.update({
                         'start': current_time,
                         'end': end_time,
-                        'clip_score_norm': max_score  # 시각화에는 max_score 사용
+                        'clip_score_norm': max_score,  # 시각화에는 max_score 사용
+                        'timestamp': window_data['timestamp'],
                     })
                 except Exception as e:
                     print(f"  [시각화 경고] 업데이트 실패: {e}")
 
             current_time += step_size
+
+        if compact_window_log:
+            print()  # 마지막 덮어쓰기 줄 정리
 
         # CLIP 점수 기준 상위 K개 선별
         print(f"\n{'='*60}")
@@ -937,35 +1184,25 @@ class AdaptiveSearchEngine:
                 print(f"[후보 {idx}/{k_top}] {item['timestamp']}")
 
                 # 시퀀셜인 경우와 비시퀀셜인 경우 처리 분리
-                if item.get('is_sequential', False) and 'best_split_index' in item['frame_scores'] and item['frame_scores']['best_split_index'] is not None:
+                if is_sequential:
                     # 시퀀셜: 분할점 앞뒤의 대표 프레임을 각각 처리
                     print("  [시퀀셜 쿼리] 분할점 앞뒤 프레임 각각 처리")
                     
-                    best_split_idx = item['frame_scores']['best_split_index']
+                    # frame_scores에서 front_frame_idx와 back_frame_idx 가져오기
+                    front_frame_idx = item['frame_scores']['front_frame_idx']
+                    back_frame_idx = item['frame_scores']['back_frame_idx']
                     
                     # 해당 윈도우의 프레임 다시 추출
                     frames_for_blip = self.vp.extract_window_frames(item['start'], item['end'], q_frames)
                     
-                    # 분할점 앞부분의 중간 프레임
-                    if best_split_idx > 0:
-                        front_frame_idx = best_split_idx // 2
-                    else:
-                        front_frame_idx = 0
-                    
-                    # 분할점 뒷부분의 중간 프레임
-                    if best_split_idx < len(frames_for_blip) - 1:
-                        back_frame_idx = best_split_idx + (len(frames_for_blip) - best_split_idx) // 2
-                    else:
-                        back_frame_idx = len(frames_for_blip) - 1
-                    
-                    # A. 앞부분 프레임 캡션 생성
+                    # A. 앞부분 프레임 캡션 생성 (쿼리 0의 최고 점수 프레임)
                     blip_start = time.time()
-                    front_caption = self.mm.generate_caption(frames_for_blip[front_frame_idx])
+                    front_caption = self.mm.generate_caption(frames_for_blip[front_frame_idx], sub_queries[0])
                     blip_time_front = time.time() - blip_start
                     
-                    # B. 뒷부분 프레임 캡션 생성
+                    # B. 뒷부분 프레임 캡션 생성 (쿼리 1의 최고 점수 프레임)
                     blip_start = time.time()
-                    back_caption = self.mm.generate_caption(frames_for_blip[back_frame_idx])
+                    back_caption = self.mm.generate_caption(frames_for_blip[back_frame_idx], sub_queries[1])
                     blip_time_back = time.time() - blip_start
                     
                     total_blip_inference_time += (blip_time_front + blip_time_back)
@@ -988,6 +1225,8 @@ class AdaptiveSearchEngine:
                     # D. 최종 점수 산출 (시퀀셜은 max_score와 semantic_sim 조합)
                     item['final_score'] = (item['max_score'] * weight_clip) + (semantic_sim * weight_semantic)
                     
+                    print(f"  -> 앞부분 프레임 인덱스: {front_frame_idx}")
+                    print(f"  -> 뒷부분 프레임 인덱스: {back_frame_idx}")
                     print(f"  -> 앞부분 캡션: {front_caption}")
                     print(f"  -> 뒷부분 캡션: {back_caption}")
                     print(f"  -> 앞부분 유사도: {semantic_sim_front:.4f}")

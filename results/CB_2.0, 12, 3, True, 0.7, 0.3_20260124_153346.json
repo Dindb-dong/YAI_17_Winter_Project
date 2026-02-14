@@ -1,0 +1,177 @@
+{
+    "meta": {
+        "video_path": "/kaggle/input/yai-17-w/sample_video.mp4",
+        "query": "바닥에 떨어진 신용카드, 난감한 표정을 짓는 남자",
+        "sub_queries": [
+            "Credit card dropped on the floor",
+            "Man with an awkward expression"
+        ],
+        "split_reason": "[Gemini API] 시간 순서나 인과 관계는 명시되지 않았지만, 쉼표(,)를 기준으로 두 개의 독립적인 상황을 묘사하고 있어 분할했습니다. 첫 번째 요소는 상황을, 두 번째 요소는 그 상황에 대한 인물의 반응을 나타냅니다.",
+        "parameters": {
+            "p": 2.0,
+            "q": 12,
+            "k": 3,
+            "USE_BLIP": true,
+            "WEIGHT_CLIP": 0.7,
+            "WEIGHT_SEMANTIC": 0.3
+        },
+        "model": "CB",
+        "timestamp": "20260124_153346"
+    },
+    "time_used": {
+        "total_time": 49.16,
+        "init_time": 0.0,
+        "model_manager_init_time": 69.86,
+        "clip_load_time": 5.26,
+        "blip_load_time": 64.6,
+        "video_processor_init_time": 3.95,
+        "api_call_time": 1.39,
+        "frame_extraction_time": 19.76,
+        "clip_inference_time": 9.42,
+        "blip_inference_time": 3.08,
+        "total_search_time": 47.77
+    },
+    "results": [
+        {
+            "start": 16.0,
+            "end": 18.0,
+            "timestamp": "0:00:16 - 0:00:18",
+            "max_score": 0.28118354082107544,
+            "best_frame_idx": 3,
+            "frame_scores": {
+                "query_0": [
+                    0.2926022708415985,
+                    0.29898884892463684,
+                    0.3042197823524475,
+                    0.3083963394165039,
+                    0.21489396691322327,
+                    0.21324129402637482,
+                    0.21717335283756256,
+                    0.21708209812641144,
+                    0.21769924461841583,
+                    0.2131599485874176,
+                    0.21051545441150665,
+                    0.21327675879001617
+                ],
+                "query_1": [
+                    0.21475765109062195,
+                    0.2226669192314148,
+                    0.23053868114948273,
+                    0.23016731441020966,
+                    0.24941690266132355,
+                    0.248514324426651,
+                    0.2524661421775818,
+                    0.253970742225647,
+                    0.2516925036907196,
+                    0.25163277983665466,
+                    0.2501686215400696,
+                    0.24966387450695038
+                ],
+                "front_frame_idx": 3,
+                "back_frame_idx": 7
+            },
+            "temp_img_path": "results/temp_thumbs/thumb_w17_16.0.jpg",
+            "is_sequential": true,
+            "q_frames": 12,
+            "blip_caption": "[전반부] the location of the credit card | [후반부] a young man looking at the camera",
+            "semantic_consistency": 0.8850921094417572,
+            "semantic_front": 0.891786515712738,
+            "semantic_back": 0.8783977031707764,
+            "final_score": 0.46235611140727995
+        },
+        {
+            "start": 15.0,
+            "end": 17.0,
+            "timestamp": "0:00:15 - 0:00:17",
+            "max_score": 0.2787184417247772,
+            "best_frame_idx": 8,
+            "frame_scores": {
+                "query_0": [
+                    0.26706957817077637,
+                    0.2715795934200287,
+                    0.2633061408996582,
+                    0.2899647355079651,
+                    0.3007195293903351,
+                    0.292935311794281,
+                    0.2948477268218994,
+                    0.3010253310203552,
+                    0.3071201741695404,
+                    0.21418644487857819,
+                    0.21478289365768433,
+                    0.21442238986492157
+                ],
+                "query_1": [
+                    0.2228897511959076,
+                    0.22937442362308502,
+                    0.19656813144683838,
+                    0.20647242665290833,
+                    0.22398535907268524,
+                    0.21633988618850708,
+                    0.21690332889556885,
+                    0.22668851912021637,
+                    0.2319899946451187,
+                    0.248140349984169,
+                    0.2492191046476364,
+                    0.25031670928001404
+                ],
+                "front_frame_idx": 8,
+                "back_frame_idx": 11
+            },
+            "temp_img_path": "results/temp_thumbs/thumb_w16_15.0.jpg",
+            "is_sequential": true,
+            "q_frames": 12,
+            "blip_caption": "[전반부] the location of the credit card | [후반부] a young man looking at the camera",
+            "semantic_consistency": 0.8850921094417572,
+            "semantic_front": 0.891786515712738,
+            "semantic_back": 0.8783977031707764,
+            "final_score": 0.4606305420398712
+        },
+        {
+            "start": 14.0,
+            "end": 16.0,
+            "timestamp": "0:00:14 - 0:00:16",
+            "max_score": 0.2720152735710144,
+            "best_frame_idx": 10,
+            "frame_scores": {
+                "query_0": [
+                    0.22261027991771698,
+                    0.22357651591300964,
+                    0.21853014826774597,
+                    0.28091874718666077,
+                    0.2793513536453247,
+                    0.27109494805336,
+                    0.2688751816749573,
+                    0.266905814409256,
+                    0.27118539810180664,
+                    0.2922777533531189,
+                    0.301175594329834,
+                    0.2947194576263428
+                ],
+                "query_1": [
+                    0.24285495281219482,
+                    0.24270528554916382,
+                    0.2420298010110855,
+                    0.23754045367240906,
+                    0.2373315393924713,
+                    0.22757843136787415,
+                    0.22396504878997803,
+                    0.21533887088298798,
+                    0.20237107574939728,
+                    0.21681344509124756,
+                    0.2225896716117859,
+                    0.2170860767364502
+                ],
+                "front_frame_idx": 10,
+                "back_frame_idx": 0
+            },
+            "temp_img_path": "results/temp_thumbs/thumb_w15_14.0.jpg",
+            "is_sequential": true,
+            "q_frames": 12,
+            "blip_caption": "[전반부] a credit card in the middle of the floor | [후반부] a young man looking at the camera",
+            "semantic_consistency": 0.8763849437236786,
+            "semantic_front": 0.8743721842765808,
+            "semantic_back": 0.8783977031707764,
+            "final_score": 0.4533261746168136
+        }
+    ]
+}
