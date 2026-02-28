@@ -1,359 +1,220 @@
-# 🎬 Adaptive Video Search Engine
+# Adaptive Video Search Engine (EMA Refined)
 
-**자연어 쿼리 기반 지능형 비디오 검색 시스템**
+자연어 쿼리로 영상 구간을 찾는 멀티모달 검색 파이프라인입니다.
+현재 준최종 로직은 `EMA_Refined_Video_Search.ipynb` 기준입니다.
 
-사용자가 자연어로 입력한 검색어를 기반으로 비디오에서 해당 장면을 정확하게 찾아주는 AI 기반 검색 엔진입니다. 단순 키워드 매칭이 아닌, 멀티모달 AI 모델을 활용하여 시맨틱(의미론적) 이해를 통해 복잡한 동작 시퀀스까지 탐지할 수 있습니다.
+## What This Version Implements
 
-> 🚀 **최신 업데이트 (2026-02-14)**: 
-> - **필터링 모드**: TOP K 후보 기반 조기 스킵으로 70-80% 속도 향상
-> - **2단계 샘플링**: 1차 빠른 스캔 + 2차 정밀 분석
-> - **최적화된 프레임 수**: q=6으로 기본값 조정 (12→6)
-> - **EMA 점수 재활용**: 불필요한 재계산 제거
-> 
-> 📖 자세한 내용: [OPTIMIZATION_REPORT.md](OPTIMIZATION_REPORT.md) | [빠른 시작 가이드](QUICK_START.md)
+- Gemini 기반 쿼리 분할/영문화 (`split_query`)
+- API 실패 시 규칙 기반 fallback 분할
+- Sliding window + 2단계 샘플링(q/3 → q)
+- Top-K 채워진 뒤 조기 스킵 필터링(임계값 = Top-K 최하위 점수의 70%)
+- CLIP 기반 1차 점수화
+  - 단일 쿼리: 프레임별 최대 유사도의 윈도우 최대값
+  - 시퀀셜 쿼리(최대 2개): 각 쿼리 최고 프레임 점수 평균
+- BLIP-2 기반 2차 보정(옵션)
+- 전체 프레임 유사도 타임라인 기반 EMA 구간 추정 (`compute_ema_segments`)
+- 실시간 Top-K 시각화 + EMA 상세 분석 리포트 저장
 
----
+## Pipeline
 
-## 🌟 주요 기능
+1. Query 분석
+- 한국어 쿼리를 Gemini로 최대 2개 동작으로 분할하고 CLIP 친화 영어 문장으로 변환
+- 실패 시 접속사 규칙(`그리고`, `나서`, `하다가` 등)으로 1회 분할
 
-### 1. **지능형 쿼리 분석 (Intelligent Query Analysis)**
+2. 1차 검색 (CLIP)
+- `p_sec` 길이 window를 `step_sec` 간격으로 이동
+- 모든 window에 대해 먼저 q/3 프레임으로 quick score 계산
+- Top-K가 채워지면 filtering mode 활성화
+- quick score가 임계값 미만이면 해당 window 스킵
+- 통과한 window만 full q 프레임으로 정밀 계산
 
-- **Gemini API 기반 한국어 쿼리 분석**: 사용자의 자연어 검색어를 시간 순서에 따른 동작(Action Sequence)으로 자동 분할
-- **예시**:
-  - "공을 던지고 나서 넘어지는 사람" → ["Person throwing a ball", "Person falling down"]
-  - "웃고 있는 아기" → ["Baby laughing"] (분할 불필요)
-- Fallback 메커니즘: API 실패 시 규칙 기반 분할 로직 자동 전환
+3. 2차 보정 (선택)
+- `USE_BLIP=True`일 때 Top-K 후보에 대해 캡션 생성 + 텍스트 유사도 계산
+- 최종 점수: `final_score = clip_score * weight_clip + semantic_score * weight_semantic`
 
-### 2. **적응형 매칭 엔진 (Adaptive Matching Engine)**
+4. EMA 구간 보정
+- 전체 프레임 유사도(기본 `frame_stride=2`, `batch_size=48`)를 미리 계산/재활용
+- Top-K anchor 기준 좌/우 EMA 경계 추정
+- 쿼리별/anchor별 상세 구간과 디버그 정보 저장
 
-- **단일 동작 검색**: CLIP 모델을 사용한 평균 유사도 기반 매칭
-- **연속 동작 검색**: 변곡점(Change Point) 탐지를 통한 시퀀셜 매칭
-  - 동작 A → 동작 B 전환 시점을 자동으로 찾아 최적의 구간 선별
-  - 양쪽 동작의 유사도를 모두 고려한 복합 점수 산출
-
-### 3. **2단계 검색 파이프라인 (Two-Stage Search)**
-
-- **1차 검색 (Coarse-grained)**: CLIP 기반 고속 스캔으로 전체 비디오 탐색
-- **2차 보정 (Fine-grained)**: BLIP-2 캡션 생성 및 의미적 유사도 검증으로 정확도 향상
-
-### 4. **지능형 필터링 모드 (Smart Filtering Mode)** 🚀 NEW!
-
-- **1차 샘플링**: 모든 윈도우를 q/3 프레임으로 빠른 스캔
-- **추세 기반 필터링**: TOP K 후보가 채워지면 자동으로 필터링 모드 활성화
-- **조기 스킵**: TOP K 최하위 점수의 70% 이하 윈도우는 과감하게 스킵
-- **동적 임계값 갱신**: TOP K가 업데이트되면 필터링 기준도 자동 조정
-- **성능**: 정답이 앞에 있을 경우 70-80% 속도 향상
-
-### 5. **효율적인 프레임 샘플링**
-
-- Sliding Window 방식으로 비디오를 p초 단위로 분할
-- 2단계 샘플링 전략: 빠른 스캔 (q/3) + 정밀 분석 (q)
-- 메모리 효율적 처리 (GPU 지원)
-- 최적화된 기본값: q=6 (기존 12에서 개선)
-
----
-
-## 🏗️ 시스템 아키텍처
+## Architecture
 
 ```mermaid
-flowchart TD
-    subgraph Input_Stage [1. Input Stage]
-        UserQuery([사용자 검색어])
-        VideoInput([비디오 파일])
+flowchart LR
+    subgraph QRY["1) Query Analysis"]
+        A["User Query (Korean)"] --> B["Gemini Split + EN Rewrite"]
+        B --> C{"Split Success?"}
+        C -- "Yes" --> D["Sub-Queries (max 2)"]
+        C -- "No" --> E["Rule-based Fallback Split"]
+        E --> D
     end
 
-    subgraph Query_Processing [2. Intelligent Query Analysis]
-        LLM[LLM API: GPT/Claude]
-        SplitCheck{동작 분할 필요?}
-        ActionList[Action A, Action B, ...]
-      
-        UserQuery --> LLM
-        LLM --> SplitCheck
-        SplitCheck -- Yes --> ActionList
-        SplitCheck -- No --> SingleAction[Single Action Query]
+    subgraph SRC["2) Window Search (CLIP)"]
+        V["Input Video"] --> W["Sliding Windows (p_sec, step_sec)"]
+        W --> X["Quick Sampling (q/3)"]
+        D --> Y["CLIP Similarity Scoring"]
+        X --> Y
+        Y --> Z{"Top-K Filled?"}
+        Z -- "No" --> F["Full Sampling (q)"]
+        Z -- "Yes" --> G{"quick_score >= threshold?"}
+        G -- "No" --> H["Skip Window"]
+        G -- "Yes" --> F
+        F --> I["Window Score + Best Frame"]
+        I --> J["Realtime Top-K Update"]
+        J --> K["Coarse Top-K Candidates"]
     end
 
-    subgraph Video_Processing [3. Video Pre-processing]
-        Windowing[Sliding Window: p초]
-        Sampling[Uniform Sampling: q개 프레임]
-      
-        VideoInput --> Windowing
-        Windowing --> Sampling
+    subgraph REF["3) Refinement"]
+        K --> L{"USE_BLIP?"}
+        L -- "Yes" --> M["BLIP Caption + Text Similarity"]
+        L -- "No" --> N["Keep CLIP Score"]
+        M --> O["Final Ranking"]
+        N --> O
     end
 
-    subgraph Core_Analysis [4. Adaptive Matching Engine]
-        CLIP[[CLIP Model]]
-        SimCurve[Similarity Curve Generation]
-        ChangePoint[Change Point Detection]
-        ScoringLogic{Adaptive Scorer}
-      
-        ActionList & SingleAction --> CLIP
-        Sampling --> CLIP
-        CLIP --> SimCurve
-        SimCurve --> ChangePoint
-        ChangePoint --> ScoringLogic
-      
-        NormalScore[Average Similarity]
-        SeqScore[Sequential Mapping + Bonus Score]
-      
-        ScoringLogic -- Single --> NormalScore
-        ScoringLogic -- Multi --> SeqScore
+    subgraph EMA["4) EMA Temporal Refinement"]
+        D --> P["Global Frame Similarity Timeline"]
+        V --> P
+        P --> Q["EMA Segment Refinement (anchor-based)"]
     end
 
-    subgraph Output_Stage [5. Refinement & Result]
-        TopK[Top-K Candidates Selection]
-        BLIP2[[BLIP-2 Re-ranking]]
-        FinalResult[최종 검색 구간 출력 및 재생]
-      
-        NormalScore & SeqScore --> TopK
-        TopK --> BLIP2
-        BLIP2 --> FinalResult
+    subgraph OUT["5) Output"]
+        O --> R["Top-K Final Candidates"]
+        Q --> R
+        R --> S["JSON Results + Window/Frame Scores"]
+        R --> T["Realtime Viz + EMA Analysis Report"]
     end
 
-    style CLIP fill:#f9f,stroke:#333,stroke-width:2px
-    style BLIP2 fill:#f9f,stroke:#333,stroke-width:2px
-    style LLM fill:#bbf,stroke:#333,stroke-width:2px
-    style SeqScore fill:#ff9,stroke:#333,stroke-width:2px
+    classDef query fill:#E3F2FD,stroke:#1E88E5,stroke-width:1.5px,color:#0D47A1;
+    classDef search fill:#E8F5E9,stroke:#2E7D32,stroke-width:1.5px,color:#1B5E20;
+    classDef refine fill:#FFF8E1,stroke:#F9A825,stroke-width:1.5px,color:#E65100;
+    classDef ema fill:#F3E5F5,stroke:#8E24AA,stroke-width:1.5px,color:#4A148C;
+    classDef output fill:#FFEBEE,stroke:#C62828,stroke-width:1.5px,color:#B71C1C;
+    classDef decision fill:#ECEFF1,stroke:#455A64,stroke-width:1.5px,color:#263238;
+
+    class A,B,D,E query;
+    class V,W,X,Y,F,H,I,J,K search;
+    class M,N,O refine;
+    class P,Q ema;
+    class R,S,T output;
+    class C,Z,G,L decision;
 ```
 
----
+## Core Classes
 
-## 🚀 설치 방법
+- `ModelManager`
+  - CLIP(`openai/clip-vit-base-patch32`)
+  - BLIP-2(`Salesforce/blip2-opt-2.7b`, optional)
+  - 이미지-텍스트/텍스트-텍스트 유사도 계산
 
-### 1. 필수 패키지 설치
+- `VideoProcessor`
+  - 비디오 메타데이터(FPS, duration) 로드
+  - window 프레임 추출, stride 프레임 iteration
+
+- `AdaptiveSearchEngine`
+  - 쿼리 분할, window 검색, Top-K 관리, BLIP 재정렬
+  - EMA 기반 세그먼트 계산
+
+- `RealTimeVisualizer`, `EMADropVisualizer`
+  - 검색 진행/최종 Top-K 시각화
+  - EMA anchor별 상세 리포트/그림 생성
+
+## Requirements
+
+노트북 기준 주요 패키지:
 
 ```bash
-pip install torch transformers opencv-python pillow numpy google-genai openai python-dotenv
+pip install transformers opencv-python pillow numpy google-genai python-dotenv matplotlib
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+pip install triton
+pip install av --upgrade
 ```
 
-**보안 관련 에러 발생 시:**
+## API Key
 
-```bash
-pip install --upgrade torch torchvision torchaudio
-```
+Gemini 사용을 위해 `GEMINI_API_KEY`가 필요합니다.
 
-### 2. 환경 변수 설정
-
-프로젝트 루트에 `.env` 파일을 생성하고 Gemini API 키를 추가하세요:
+로컬 실행 시 `.env` 예시:
 
 ```env
-GEMINI_API_KEY=your_gemini_api_key_here
+GEMINI_API_KEY=your_key_here
 ```
 
-**API 키 발급:**
+노트북(Colab)에서는 `userdata.get('GEMINI_API_KEY')` 경로를 사용합니다.
 
-- [Google AI Studio](https://aistudio.google.com/app/apikey)에서 결제 수단만 추가 시 무료로 발급 가능
+## How To Run
 
----
+현재 기준 실행 엔트리는 노트북입니다.
 
-## 📖 사용 방법
+1. `EMA_Refined_Video_Search.ipynb` 열기
+2. 모델/비디오 초기화 셀 실행
+3. `main()` 설정값 수정 후 실행
 
-### 기본 실행
-
-```bash
-python main.py
-```
-
-실행 시 BLIP-2 사용 여부를 선택할 수 있습니다:
-
-```
-BLIP-2 사용 여부 (True/False): False
-```
-
-### 설정 변경
-
-`main.py` 파일의 `main()` 함수 내에서 다음 파라미터를 조정할 수 있습니다:
+`main()` 주요 설정:
 
 ```python
-# 비디오 및 검색어 설정
-VIDEO_PATH = "sample_video.mp4"
-QUERY = "바닥에 떨어진 신용카드"
+VIDEO_PATH = "/content/YAI_17_Winter_Project/sample_video.mp4"
+SAVE_PATH = "results"
+QUERY = "차를 운전하면서 대화하는 남자"
 
-# 실험 파라미터
-p_list = [2.0, 4.0]      # 윈도우 크기 (초)
-q_list = [24, 48]         # 샘플링 프레임 수
-k_list = [3, 5]          # Top-K 개수
-USE_BLIP = False         # BLIP-2 사용 여부
-WEIGHT_CLIP = 0.7        # CLIP 점수 가중치
-WEIGHT_SEMANTIC = 0.3    # 시맨틱 유사도 가중치
-USE_LOOP = False         # 반복 실험 여부
+p_list = [2.0, 4.0]
+q_list = [6, 12]
+k_list = [3, 5]
+STEP_SEC = 1.0
+
+USE_BLIP = False
+WEIGHT_CLIP = 0.7
+WEIGHT_SEMANTIC = 0.3
+
+ENABLE_EMA = True
+EMA_ALPHA = 0.85
+EMA_FRAME_STRIDE = 2
+EMA_BATCH_SIZE = 48
+EMA_MAX_DROP_SEGMENTS = 3
+
+USE_LOOP = False
 ```
 
----
+## Output Files
 
-## 🔧 파라미터 설명
+`results/` 아래에 저장됩니다.
 
-| 파라미터            | 설명                                | 권장값                                | 최적화 업데이트 |
-| ------------------- | ----------------------------------- | ------------------------------------- | --------------- |
-| `p`               | 윈도우 크기 (초)                    | 2.0 ~ 4.0                             | -               |
-| `q`               | 윈도우당 샘플링 프레임 수           | **6** ~ 12 🚀 (기존 24~48)             | **개선됨**      |
-| `k`               | 반환할 상위 후보 개수               | 3 ~ 5                                 | -               |
-| `USE_BLIP`        | BLIP-2 사용 여부 (메모리 4GB+ 필요) | False (빠른 검색), True (정확도 향상) | -               |
-| `WEIGHT_CLIP`     | CLIP 점수 가중치                    | 0.7                                   | -               |
-| `WEIGHT_SEMANTIC` | BLIP-2 시맨틱 점수 가중치           | 0.3                                   | -               |
-| `filtering_threshold` | 필터링 임계값 (내부)              | 0.7 (TOP K 최하위의 70%) 🚀            | **신규 추가**   |
+- 메인 결과: `Clip_...json` 또는 `CB_...json`
+  - `meta`, `time_used`, `results`, `ema`
+- 전체 프레임 점수: `whole_frame_scores_...json`
+- 전체 윈도우 점수: `whole_window_scores_...json` (반복 모드에서는 `whole_score_...json` 포맷도 사용)
+- 실시간 시각화: `viz_...png`
+- EMA 분석: `results/ema_analysis/`
+  - `ema_segments_...png`
+  - `ema_report_...txt`
 
-**하드웨어 권장 사양:**
+## Parameter Guide
 
-- GPU: NVIDIA GPU with 6GB+ VRAM (BLIP-2 사용 시)
-- CPU: 4 코어 이상
-- RAM: 8GB 이상 (BLIP-2 사용 시 16GB 권장)
+- `p`: window 길이(초)
+- `q`: window당 샘플 프레임 수
+- `k`: Top-K 개수
+- `STEP_SEC`: window 이동 간격
+- `USE_BLIP`: BLIP-2 재정렬 사용 여부
+- `WEIGHT_CLIP`, `WEIGHT_SEMANTIC`: BLIP 사용 시 최종 점수 가중치
+- `EMA_ALPHA`: EMA smoothing 계수
+- `EMA_FRAME_STRIDE`: EMA 계산용 프레임 간격
+- `EMA_BATCH_SIZE`: EMA 계산 배치 크기
+- `EMA_MAX_DROP_SEGMENTS`: anchor당 하락 구간 탐색 수
 
-**성능 개선:**
+## Notes
 
-- 긴 영상(30분+): 기존 대비 **70-80% 빠름** (필터링 모드 덕분)
-- 짧은 영상(5분): 기존 대비 **40-50% 빠름**
-- 메모리 사용량: **30-40% 감소** (조기 스킵 및 점수 재활용)
+- 긴 영상에서는 filtering mode로 많은 window를 스킵해 속도 개선 효과가 큽니다.
+- BLIP-2는 GPU 메모리 사용량이 높습니다. OOM 시 `USE_BLIP=False`, `q` 축소를 우선 권장합니다.
+- 임시 썸네일은 실행 종료 시 `cleanup_temp_images()`로 정리됩니다.
 
----
+## Project Files
 
-## 📊 출력 형식
+- 준최종 노트북: `EMA_Refined_Video_Search.ipynb`
+- 요약 문서: `IMPLEMENTATION_SUMMARY.md`
+- 최적화 문서: `OPTIMIZATION_REPORT.md`
+- 빠른 시작: `QUICK_START.md`
 
-검색 결과는 JSON 파일로 저장됩니다:
+## License
 
-```json
-{
-  "meta": {
-    "video_path": "sample_video.mp4",
-    "query": "바닥에 떨어진 신용카드",
-    "sub_queries": ["Credit card falling on the ground"],
-    "split_reason": "[Gemini API] 단일 동작/상태를 묘사하는 쿼리로 분할하지 않았습니다.",
-    "parameters": {"p": 2.0, "q": 24, "k": 3},
-    "model": "Clip",
-    "timestamp": "20260121_014931"
-  },
-  "results": [
-    {
-      "start": 10.5,
-      "end": 12.5,
-      "timestamp": "0:00:10 - 0:00:12",
-      "raw_score": 0.387,
-      "clip_score_norm": 74.8,
-      "frame_scores": {
-        "query_0": [0.35, 0.39, 0.41, ...],
-        "best_split_index": null
-      },
-      "blip_caption": "A credit card falling on the floor",
-      "semantic_consistency": 0.82,
-      "final_score": 76.7
-    }
-  ]
-}
-```
-
----
-
-## 🧩 핵심 컴포넌트
-
-### 1. **ModelManager**
-
-- CLIP 및 BLIP-2 모델 로딩 및 관리
-- GPU/CPU 자동 감지 및 할당
-- 코사인 유사도 계산 및 텍스트 임베딩 생성
-
-### 2. **VideoProcessor**
-
-- 비디오 로딩 및 메타데이터 추출 (FPS, 총 프레임 수 등)
-- 윈도우 기반 프레임 추출 및 샘플링
-
-### 3. **AdaptiveSearchEngine**
-
-- 쿼리 분석 및 동작 분할 (`split_query`)
-- 변곡점 탐지를 통한 시퀀셜 점수 계산 (`calculate_sequential_score`)
-- 2단계 검색 파이프라인 실행 (`search`)
-- 점수 정규화 (0-100 스케일)
-
----
-
-## 🎯 검색 알고리즘 상세
-
-### 점수 정규화
-
-CLIP의 원시 코사인 유사도를 0-100 스케일로 변환:
-
-```math
-{Normalized Score} = \frac{\text{Raw Score} - 0.2}{0.45 - 0.2} \times 100
-```
-
-- **0.2 이하**: 0점
-- **0.45 이상**: 100점
-- **클리핑**: 0-100 범위로 제한
-
-### 변곡점 탐지 (Sequential Matching)
-
-쿼리가 [A, B]로 분할된 경우:
-
-1. 각 프레임에 대해 A 유사도와 B 유사도를 계산
-2. 윈도우의 20%-80% 구간에서 최적 분할 지점 탐색
-3. t 시점 기준: `score = (avg(A[:t]) + avg(B[t:])) / 2`
-4. 최대 점수를 갖는 t를 변곡점으로 선정
-
----
-
-## 🛠️ 기술 스택
-
-- **Vision Models**: OpenAI CLIP (ViT-B/32), Salesforce BLIP-2 (OPT-2.7B)
-- **LLM API**: Google Gemini 2.0 Flash Lite
-- **Deep Learning**: PyTorch, Transformers (Hugging Face)
-- **Computer Vision**: OpenCV, Pillow
-- **Others**: NumPy, python-dotenv
-
----
-
-## 📝 예제 쿼리
-
-| 쿼리                                    | 분할 결과                    | 매칭 방식   |
-| --------------------------------------- | ---------------------------- | ----------- |
-| "웃고 있는 아기"                        | 분할 없음                    | 단일 동작   |
-| "공을 던지고 나서 넘어지는 사람"        | [던지는 동작, 넘어지는 동작] | 시퀀셜 매칭 |
-| "요리를 하다가 불이 나서 당황하는 남자" | [요리 동작, 당황 동작]       | 시퀀셜 매칭 |
-| "바닥에 떨어진 신용카드"                | 분할 없음                    | 단일 동작   |
-
----
-
-## 🐛 문제 해결
-
-### 1. Gemini API 오류
-
-```
-Gemini API Error: ... Switching to Fallback.
-```
-
-- `.env` 파일의 API 키가 올바른지 확인
-- 인터넷 연결 상태 확인
-- 시스템이 자동으로 규칙 기반 분할로 전환됨 (정상 동작)
-
-### 2. GPU 메모리 부족
-
-```
-CUDA out of memory
-```
-
-- `USE_BLIP = False`로 설정하여 BLIP-2 비활성화
-- `q` 값을 줄여서 프레임 샘플링 수 감소
-
-### 3. PyTorch 보안 관련 에러
-
-```bash
-pip install --upgrade torch torchvision torchaudio
-```
-
----
-
-## 📄 라이센스
-
-이 프로젝트는 교육 목적으로 작성되었습니다.
-
----
-
-## 👥 기여
-
-YAI Winter Project 2026-1학기
-
----
-
-## 🔗 참고 자료
-
-- [CLIP Paper](https://arxiv.org/abs/2103.00020) - Learning Transferable Visual Models From Natural Language Supervision
-- [BLIP-2 Paper](https://arxiv.org/abs/2301.12597) - Bootstrapping Language-Image Pre-training with Frozen Image Encoders
-- [Google Gemini API](https://ai.google.dev/)
+교육/연구 목적 프로젝트.
