@@ -19,10 +19,12 @@
 ## Pipeline
 
 1. Query 분석
+
 - 한국어 쿼리를 Gemini로 최대 2개 동작으로 분할하고 CLIP 친화 영어 문장으로 변환
 - 실패 시 접속사 규칙(`그리고`, `나서`, `하다가` 등)으로 1회 분할
 
 2. 1차 검색 (CLIP)
+
 - `p_sec` 길이 window를 `step_sec` 간격으로 이동
 - 모든 window에 대해 먼저 q/3 프레임으로 quick score 계산
 - Top-K가 채워지면 filtering mode 활성화
@@ -30,10 +32,12 @@
 - 통과한 window만 full q 프레임으로 정밀 계산
 
 3. 2차 보정 (선택)
+
 - `USE_BLIP=True`일 때 Top-K 후보에 대해 캡션 생성 + 텍스트 유사도 계산
 - 최종 점수: `final_score = clip_score * weight_clip + semantic_score * weight_semantic`
 
 4. EMA 구간 보정
+
 - 전체 프레임 유사도(기본 `frame_stride=2`, `batch_size=48`)를 미리 계산/재활용
 - Top-K anchor 기준 좌/우 EMA 경계 추정
 - 쿼리별/anchor별 상세 구간과 디버그 정보 저장
@@ -41,43 +45,54 @@
 ## Architecture
 
 ```mermaid
-flowchart LR
-    subgraph QRY["1) Query Analysis"]
-        A["User Query (Korean)"] --> B["Gemini Split + EN Rewrite"]
-        B --> C{"Split Success?"}
-        C -- "Yes" --> D["Sub-Queries (max 2)"]
-        C -- "No" --> E["Rule-based Fallback Split"]
-        E --> D
+flowchart TB
+    subgraph TOP[" "]
+        direction LR
+        subgraph QRY["1) Query Analysis"]
+            A["User Query (Korean)"] --> B["Gemini Split + EN Rewrite"]
+            B --> C{"Split Success?"}
+            C -- "Yes" --> D["Sub-Queries (max 2)"]
+            C -- "No" --> E["Rule-based Fallback Split"]
+            E --> D
+        end
+
+        subgraph SRC["2) Window Search (CLIP)"]
+            V["Input Video"] --> W["Sliding Windows (p_sec, step_sec)"]
+            W --> X["Quick Sampling (q/3)"]
+            D --> Y["CLIP Similarity Scoring"]
+            X --> Y
+            Y --> Z{"Top-K Filled?"}
+            Z -- "No" --> F["Full Sampling (q)"]
+            Z -- "Yes" --> G{"quick_score >= threshold?"}
+            G -- "No" --> H["Skip Window"]
+            G -- "Yes" --> F
+            F --> I["Window Score + Best Frame"]
+            I --> J["Realtime Top-K Update"]
+            J --> K["Coarse Top-K Candidates"]
+        end
     end
 
-    subgraph SRC["2) Window Search (CLIP)"]
-        V["Input Video"] --> W["Sliding Windows (p_sec, step_sec)"]
-        W --> X["Quick Sampling (q/3)"]
-        D --> Y["CLIP Similarity Scoring"]
-        X --> Y
-        Y --> Z{"Top-K Filled?"}
-        Z -- "No" --> F["Full Sampling (q)"]
-        Z -- "Yes" --> G{"quick_score >= threshold?"}
-        G -- "No" --> H["Skip Window"]
-        G -- "Yes" --> F
-        F --> I["Window Score + Best Frame"]
-        I --> J["Realtime Top-K Update"]
-        J --> K["Coarse Top-K Candidates"]
+    subgraph BOTTOM[" "]
+        direction LR
+        subgraph REF["3) Refinement"]
+            K --> L{"USE_BLIP?"}
+            L -- "Yes" --> M["BLIP Caption + Text Similarity"]
+            L -- "No" --> N["Keep CLIP Score"]
+            M --> O["Final Ranking"]
+            N --> O
+        end
+
+        subgraph EMA["4) EMA Temporal Refinement"]
+            D --> P["Global Frame Similarity Timeline"]
+            V --> P
+            P --> Q["EMA Segment Refinement (anchor-based)"]
+        end
     end
 
-    subgraph REF["3) Refinement"]
-        K --> L{"USE_BLIP?"}
-        L -- "Yes" --> M["BLIP Caption + Text Similarity"]
-        L -- "No" --> N["Keep CLIP Score"]
-        M --> O["Final Ranking"]
-        N --> O
-    end
-
-    subgraph EMA["4) EMA Temporal Refinement"]
-        D --> P["Global Frame Similarity Timeline"]
-        V --> P
-        P --> Q["EMA Segment Refinement (anchor-based)"]
-    end
+    QRY --- SRC
+    REF --- EMA
+    QRY -.-> REF
+    SRC -.-> EMA
 
     subgraph OUT["5) Output"]
         O --> R["Top-K Final Candidates"]
