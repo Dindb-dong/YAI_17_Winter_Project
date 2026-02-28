@@ -1,0 +1,1014 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <title>Text-to-Video Temporal Retrieval | Project Deck</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700&family=Noto+Sans+KR:wght@400;500;700&display=swap" rel="stylesheet">
+  <style>
+    :root {
+      --bg: #f5f6f8;
+      --panel: #ffffff;
+      --ink: #1f252f;
+      --muted: #6b7280;
+      --line: #e5e7eb;
+      --blue: #2f6df6;
+      --green: #169b63;
+      --red: #d43f3a;
+      --shadow: 0 14px 40px rgba(17, 24, 39, 0.08);
+      --radius: 18px;
+    }
+
+    * { box-sizing: border-box; }
+    html, body {
+      margin: 0;
+      padding: 0;
+      background:
+        radial-gradient(1200px 500px at 120% -20%, #dbe7ff 0%, rgba(219, 231, 255, 0) 55%),
+        radial-gradient(900px 400px at -20% 120%, #ebfff5 0%, rgba(235, 255, 245, 0) 55%),
+        var(--bg);
+      color: var(--ink);
+      font-family: "Noto Sans KR", "Space Grotesk", sans-serif;
+      min-height: 100%;
+      overflow: hidden;
+    }
+
+    .deck {
+      width: 100vw;
+      height: 100vh;
+      position: relative;
+      display: grid;
+      grid-template-rows: auto 1fr auto;
+    }
+
+    .topbar {
+      position: relative;
+      z-index: 30;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      padding: 14px 22px;
+      background: rgba(255, 255, 255, 0.82);
+      border-bottom: 1px solid var(--line);
+      backdrop-filter: blur(8px);
+    }
+
+    .brand {
+      font-family: "Space Grotesk", sans-serif;
+      font-weight: 700;
+      letter-spacing: 0.02em;
+      font-size: 14px;
+      color: #202938;
+    }
+
+    .status {
+      font-size: 13px;
+      color: var(--muted);
+      font-weight: 500;
+    }
+
+    .progress-wrap {
+      position: absolute;
+      left: 0;
+      right: 0;
+      bottom: -1px;
+      height: 2px;
+      background: #eef0f3;
+    }
+
+    .progress-bar {
+      height: 100%;
+      width: 0%;
+      background: linear-gradient(90deg, var(--blue), #6b9bff);
+      transition: width 360ms ease;
+    }
+
+    .viewport {
+      position: relative;
+      overflow: hidden;
+      width: 100%;
+      height: 100%;
+    }
+
+    .slides {
+      display: flex;
+      width: 100%;
+      height: 100%;
+      transition: transform 520ms cubic-bezier(.2, .85, .2, 1);
+      will-change: transform;
+    }
+
+    .slide {
+      min-width: 100%;
+      height: 100%;
+      padding: 34px 86px 84px;
+      display: grid;
+      align-content: start;
+      gap: 18px;
+      overflow: auto;
+      scrollbar-width: thin;
+    }
+
+    .slide-title {
+      margin: 0;
+      font-family: "Space Grotesk", sans-serif;
+      font-size: clamp(28px, 4vw, 46px);
+      line-height: 1.07;
+      letter-spacing: -0.02em;
+      color: #131a25;
+    }
+
+    .subtitle {
+      margin: 0;
+      color: #4b5563;
+      font-size: clamp(14px, 1.5vw, 18px);
+      line-height: 1.65;
+      max-width: 920px;
+    }
+
+    .kicker {
+      display: inline-flex;
+      width: fit-content;
+      padding: 6px 12px;
+      border-radius: 999px;
+      font-size: 12px;
+      font-weight: 700;
+      letter-spacing: .03em;
+      color: #1e3a8a;
+      background: #e8efff;
+      border: 1px solid #cddcff;
+    }
+
+    .grid-2 {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .grid-3 {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 16px;
+    }
+
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--line);
+      border-radius: var(--radius);
+      box-shadow: var(--shadow);
+      padding: 18px 18px 16px;
+    }
+
+    .metric {
+      display: grid;
+      gap: 8px;
+      min-height: 120px;
+    }
+
+    .metric h3 {
+      margin: 0;
+      font-size: 15px;
+      color: #374151;
+      font-weight: 700;
+    }
+
+    .metric .value {
+      margin: 0;
+      font-family: "Space Grotesk", sans-serif;
+      font-size: 34px;
+      line-height: 1;
+      letter-spacing: -0.03em;
+    }
+
+    .blue { color: var(--blue); }
+    .red { color: var(--red); }
+    .green { color: var(--green); }
+
+    .muted { color: var(--muted); }
+
+    .expand-card {
+      background: #fff;
+      border: 1px solid #dfe3ea;
+      border-radius: 16px;
+      overflow: hidden;
+      transition: border-color 250ms ease, box-shadow 250ms ease, transform 250ms ease;
+    }
+
+    .expand-card:hover {
+      border-color: #c7d2e2;
+      box-shadow: 0 10px 28px rgba(30, 41, 59, 0.08);
+      transform: translateY(-2px);
+    }
+
+    .expand-head {
+      width: 100%;
+      border: 0;
+      padding: 16px 16px 14px;
+      background: linear-gradient(180deg, #ffffff 0%, #fafbfc 100%);
+      cursor: pointer;
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      text-align: left;
+      font: inherit;
+      color: inherit;
+    }
+
+    .expand-head strong {
+      font-size: 15px;
+      color: #1f2937;
+    }
+
+    .expand-head span {
+      color: #6b7280;
+      font-size: 13px;
+    }
+
+    .chev {
+      width: 24px;
+      height: 24px;
+      border-radius: 99px;
+      border: 1px solid #d9dee7;
+      display: inline-grid;
+      place-items: center;
+      color: #5b6473;
+      font-size: 14px;
+      transition: transform 250ms ease;
+      flex-shrink: 0;
+      margin-left: 12px;
+    }
+
+    .expand-card.open .chev { transform: rotate(180deg); }
+
+    .expand-body {
+      max-height: 0;
+      overflow: hidden;
+      transition: max-height 280ms ease;
+      border-top: 1px solid transparent;
+      background: #fcfcfd;
+    }
+
+    .expand-card.open .expand-body {
+      border-top-color: #eceff4;
+    }
+
+    .expand-inner {
+      padding: 14px 16px 16px;
+      font-size: 14px;
+      line-height: 1.62;
+      color: #374151;
+    }
+
+    .timeline {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 14px;
+    }
+
+    .phase {
+      border: 1px solid #e3e7ee;
+      border-radius: 16px;
+      background: #fff;
+      padding: 14px;
+    }
+
+    .phase h4 {
+      margin: 0 0 8px;
+      font-size: 14px;
+      color: #111827;
+    }
+
+    .phase p {
+      margin: 0;
+      color: #4b5563;
+      font-size: 13px;
+      line-height: 1.5;
+    }
+
+    .diagram-wrap {
+      display: grid;
+      grid-template-columns: 1.2fr 0.8fr;
+      gap: 16px;
+    }
+
+    .mermaid-box {
+      background: #fff;
+      border: 1px solid #dfe3ea;
+      border-radius: 18px;
+      padding: 14px 12px;
+      box-shadow: var(--shadow);
+      overflow: auto;
+      min-height: 420px;
+    }
+
+    .legend {
+      display: grid;
+      gap: 12px;
+      align-content: start;
+    }
+
+    .legend-item {
+      background: #fff;
+      border: 1px solid #dfe3ea;
+      border-radius: 14px;
+      padding: 12px;
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .tag {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      font-weight: 700;
+      font-size: 12px;
+      margin-bottom: 7px;
+      color: #1f2937;
+    }
+
+    .dot {
+      width: 10px;
+      height: 10px;
+      border-radius: 50%;
+      flex-shrink: 0;
+    }
+
+    .dot.blue { background: var(--blue); }
+    .dot.red { background: var(--red); }
+    .dot.green { background: var(--green); }
+
+    .nav {
+      position: absolute;
+      top: 50%;
+      transform: translateY(-50%);
+      width: 48px;
+      height: 48px;
+      border: 1px solid #d6dbe6;
+      background: rgba(255, 255, 255, 0.94);
+      border-radius: 999px;
+      box-shadow: 0 10px 24px rgba(15, 23, 42, 0.14);
+      color: #1f2937;
+      cursor: pointer;
+      font-size: 22px;
+      z-index: 40;
+      transition: transform 180ms ease, background 180ms ease;
+    }
+
+    .nav:hover { transform: translateY(-50%) scale(1.05); background: #fff; }
+    .nav:disabled { opacity: .35; cursor: default; transform: translateY(-50%); }
+    .nav.prev { left: 20px; }
+    .nav.next { right: 20px; }
+
+    .bottombar {
+      z-index: 30;
+      padding: 8px 22px 12px;
+      display: flex;
+      justify-content: center;
+      align-items: center;
+      gap: 8px;
+      background: rgba(255, 255, 255, 0.75);
+      border-top: 1px solid var(--line);
+      backdrop-filter: blur(8px);
+    }
+
+    .dot-nav {
+      width: 9px;
+      height: 9px;
+      border-radius: 999px;
+      border: 0;
+      background: #cad0dc;
+      cursor: pointer;
+      transition: transform 180ms ease, background 180ms ease;
+    }
+
+    .dot-nav.active {
+      transform: scale(1.35);
+      background: var(--blue);
+    }
+
+    .footnote {
+      margin-top: 2px;
+      color: #9aa1ae;
+      font-size: 12px;
+    }
+
+    .intro-slide {
+      position: relative;
+      overflow: hidden;
+    }
+
+    .intro-slide::before,
+    .intro-slide::after {
+      content: "";
+      position: absolute;
+      border-radius: 999px;
+      pointer-events: none;
+      filter: blur(1px);
+    }
+
+    .intro-slide::before {
+      width: 420px;
+      height: 420px;
+      right: -120px;
+      top: -140px;
+      background: radial-gradient(circle at 30% 30%, rgba(47, 109, 246, 0.2), rgba(47, 109, 246, 0.02) 70%);
+    }
+
+    .intro-slide::after {
+      width: 360px;
+      height: 360px;
+      left: -100px;
+      bottom: -120px;
+      background: radial-gradient(circle at 70% 70%, rgba(22, 155, 99, 0.18), rgba(22, 155, 99, 0.02) 70%);
+    }
+
+    .intro-wrap {
+      position: relative;
+      z-index: 2;
+      display: grid;
+      grid-template-columns: 1.25fr 0.75fr;
+      gap: 18px;
+      align-items: stretch;
+      margin-top: 6px;
+    }
+
+    .intro-main {
+      padding: 24px;
+      border-radius: 22px;
+      background: linear-gradient(165deg, #ffffff 0%, #f8fafc 70%);
+      border: 1px solid #e3e7ef;
+      box-shadow: var(--shadow);
+      min-height: 320px;
+      display: grid;
+      align-content: start;
+      gap: 14px;
+    }
+
+    .intro-title {
+      margin: 4px 0 0;
+      font-family: "Space Grotesk", sans-serif;
+      font-size: clamp(34px, 4.8vw, 60px);
+      line-height: 1.04;
+      letter-spacing: -0.03em;
+      color: #101826;
+      max-width: 840px;
+    }
+
+    .intro-sub {
+      margin: 0;
+      color: #4b5563;
+      font-size: clamp(15px, 1.5vw, 20px);
+      line-height: 1.65;
+      max-width: 760px;
+    }
+
+    .intro-side {
+      display: grid;
+      gap: 12px;
+      align-content: start;
+    }
+
+    .info-card {
+      border: 1px solid #e0e5ee;
+      border-radius: 16px;
+      background: #ffffff;
+      box-shadow: 0 10px 26px rgba(30, 41, 59, 0.08);
+      padding: 14px 14px 13px;
+    }
+
+    .info-card h4 {
+      margin: 0 0 8px;
+      font-size: 13px;
+      color: #6b7280;
+      font-weight: 700;
+      letter-spacing: .02em;
+    }
+
+    .info-card p {
+      margin: 0;
+      font-size: 14px;
+      line-height: 1.6;
+      color: #1f2937;
+      word-break: keep-all;
+    }
+
+    .github-link {
+      color: #1954d1;
+      text-decoration: none;
+      font-weight: 600;
+    }
+
+    .github-link:hover {
+      text-decoration: underline;
+    }
+
+    @media (max-width: 980px) {
+      .slide { padding: 26px 56px 80px; }
+      .grid-2, .diagram-wrap, .timeline, .intro-wrap { grid-template-columns: 1fr; }
+      .grid-3 { grid-template-columns: 1fr; }
+      .nav { width: 42px; height: 42px; }
+      .nav.prev { left: 10px; }
+      .nav.next { right: 10px; }
+    }
+
+    @media (max-width: 640px) {
+      .slide { padding: 20px 18px 72px; }
+      .topbar { padding: 12px 14px; }
+      .brand { font-size: 12px; }
+      .status { font-size: 12px; }
+      .panel { padding: 14px; border-radius: 14px; }
+      .slide-title { font-size: clamp(25px, 7vw, 34px); }
+    }
+  </style>
+</head>
+<body>
+  <div class="deck">
+    <header class="topbar">
+      <div class="brand">Text-to-Video Temporal Retrieval</div>
+      <div class="status"><span id="slideIndex">1</span> / <span id="slideTotal">6</span></div>
+      <div class="progress-wrap"><div id="progressBar" class="progress-bar"></div></div>
+    </header>
+
+    <main class="viewport">
+      <button class="nav prev" id="prevBtn" aria-label="이전 슬라이드">‹</button>
+      <div class="slides" id="slides">
+        <section class="slide intro-slide">
+          <span class="kicker">TEAM INTRO</span>
+          <div class="intro-wrap">
+            <article class="intro-main">
+              <h1 class="intro-title">Text-to-Video<br/>Temporal Retrieval</h1>
+              <p class="intro-sub">
+                영상 속 장면과 시퀀스를 자연어로 검색하는 CV 프로젝트
+              </p>
+            </article>
+
+            <aside class="intro-side">
+              <article class="info-card">
+                <h4>발표 팀</h4>
+                <p>YAI 17기 겨울방학 CV 프로젝트 팀</p>
+              </article>
+              <article class="info-card">
+                <h4>팀원</h4>
+                <p>김동욱, 김예나, 유예슬</p>
+              </article>
+              <article class="info-card">
+                <h4>Github</h4>
+                <p>
+                  <a class="github-link" href="https://github.com/Dindb-dong/YAI_17_Winter_Project" target="_blank" rel="noopener noreferrer">
+                    github.com/Dindb-dong/YAI_17_Winter_Project
+                  </a>
+                </p>
+              </article>
+            </aside>
+          </div>
+        </section>
+
+        <section class="slide">
+          <span class="kicker">PROJECT OVERVIEW</span>
+          <h1 class="slide-title">Adaptive Video Search Engine<br/>for Context & Sequence</h1>
+          <p class="subtitle">
+            자연어 쿼리를 기반으로 영상의 <span class="blue">장면</span>과 <span class="green">시퀀스(구간)</span>를 찾는
+            Text-to-Video Temporal Retrieval 프로젝트입니다.
+            현재 로직은 <span class="red">CLIP 중심 검색 + EMA 기반 구간 정밀화</span>를 핵심으로 구성됩니다.
+          </p>
+
+          <div class="grid-3">
+            <article class="panel metric">
+              <h3>핵심 목표</h3>
+              <p class="value blue">Scene → Sequence</p>
+              <p class="muted">단일 장면 검색에서 연속 맥락 구간 검색으로 확장</p>
+            </article>
+            <article class="panel metric">
+              <h3>핵심 전략</h3>
+              <p class="value green">2-Stage Search</p>
+              <p class="muted">q/3 quick scan + q full scan, Top-K 기반 필터링</p>
+            </article>
+            <article class="panel metric">
+              <h3>핵심 고도화</h3>
+              <p class="value red">EMA Refinement</p>
+              <p class="muted">anchor 중심 좌/우 경계 추정으로 시간 구간 정밀화</p>
+            </article>
+          </div>
+        </section>
+
+        <section class="slide">
+          <span class="kicker">WHY THIS PROJECT</span>
+          <h2 class="slide-title">프로젝트 시작 이유</h2>
+          <p class="subtitle">
+            실제 사용자의 불편과 연구 공백을 동시에 해결하는 방향으로 기획했습니다.
+          </p>
+
+          <div class="grid-2">
+            <article class="expand-card open">
+              <button class="expand-head" aria-expanded="true">
+                <span>
+                  <strong>실사용 문제</strong><br/>
+                  <span>다시 보고 싶은 장면을 정확히 찾기 어려움</span>
+                </span>
+                <i class="chev">⌄</i>
+              </button>
+              <div class="expand-body" style="max-height: 380px;">
+                <div class="expand-inner">
+                  영화나 유튜브를 보다가 특정 장면이 떠올라도 정확한 시점은 기억나지 않는 경우가 많습니다.
+                  단순 키워드 검색만으로는 <strong>맥락 기반 탐색</strong>이 어렵기 때문에,
+                  텍스트 의미를 이해하는 영상 검색이 필요했습니다.
+                </div>
+              </div>
+            </article>
+
+            <article class="expand-card">
+              <button class="expand-head" aria-expanded="false">
+                <span>
+                  <strong>연구/구현 공백</strong><br/>
+                  <span>맥락·시퀀스를 함께 다루는 구현 사례 부족</span>
+                </span>
+                <i class="chev">⌄</i>
+              </button>
+              <div class="expand-body">
+                <div class="expand-inner">
+                  Text-to-Video Temporal Retrieval 관련 논문은 존재하지만,
+                  실제 프로젝트에서 <strong>장면 + 시퀀스</strong>를 함께 안정적으로 찾는 구현은 제한적이었습니다.
+                  그래서 본 팀은 실사용 가능한 수준으로
+                  <span class="blue">문장 분해</span> - <span class="green">시간 구간 추정</span> - <span class="red">경계 안정화</span>
+                  를 연결하는 로직을 직접 설계했습니다.
+                </div>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="slide">
+          <span class="kicker">EVOLUTION</span>
+          <h2 class="slide-title">프로젝트 발전 과정</h2>
+          <p class="subtitle">
+            1차(장면 검색) → 2차(구간 검색) → 3차(경계 안정화) 순서로 발전했습니다.
+          </p>
+
+          <div class="timeline">
+            <article class="phase">
+              <h4>1차: 장면 검색</h4>
+              <p>Sliding Window + CLIP 기반 Top-K 후보 추출</p>
+            </article>
+            <article class="phase">
+              <h4>2차: 시퀀스 검색</h4>
+              <p>Top-K anchor 중심 좌/우 탐색, EMA로 구간 정밀화</p>
+            </article>
+            <article class="phase">
+              <h4>3차: 안정화</h4>
+              <p>경계 과확장/과축소 문제를 임계 기반 수렴 로직으로 완화</p>
+            </article>
+          </div>
+
+          <div class="grid-3">
+            <article class="expand-card">
+              <button class="expand-head" aria-expanded="false">
+                <span>
+                  <strong>1차 업데이트</strong><br/>
+                  <span>검색 기본기 개선</span>
+                </span>
+                <i class="chev">⌄</i>
+              </button>
+              <div class="expand-body">
+                <div class="expand-inner">
+                  BLIP-2 기본경로를 제거하고 CLIP 중심으로 단순화했습니다.
+                  `step`을 도입해 윈도우를 중첩시켰고, 평균 점수보다 강건한 `max` 기반 점수화로 바꿨습니다.
+                  또한 Gemini로 한국어 쿼리를 영어 동작 문장으로 분할/변환했습니다.
+                </div>
+              </div>
+            </article>
+
+            <article class="expand-card">
+              <button class="expand-head" aria-expanded="false">
+                <span>
+                  <strong>2차 업데이트</strong><br/>
+                  <span>속도와 구간 정확도 동시 개선</span>
+                </span>
+                <i class="chev">⌄</i>
+              </button>
+              <div class="expand-body">
+                <div class="expand-inner">
+                  단일 하락점이 아니라 다중 하락 후보를 비교해 경계를 선택했습니다.
+                  `q/3` 빠른 스캔 이후 Top-K 하위 70% 미만 window를 스킵하는 filtering mode를 추가해
+                  긴 영상에서 추론 시간을 크게 줄였습니다.
+                </div>
+              </div>
+            </article>
+
+            <article class="expand-card">
+              <button class="expand-head" aria-expanded="false">
+                <span>
+                  <strong>3차 업데이트</strong><br/>
+                  <span>경계 안정화</span>
+                </span>
+                <i class="chev">⌄</i>
+              </button>
+              <div class="expand-body">
+                <div class="expand-inner">
+                  반복 확장만으로는 구간이 짧거나 길어지는 문제가 있어,
+                  top window `max score` 대비 고득점 프레임 구간을 초기 경계로 잡고
+                  기준을 점진적으로 올리며 구간을 수렴시키는 방식을 적용했습니다.
+                </div>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="slide">
+          <span class="kicker">CORE LOGIC</span>
+          <h2 class="slide-title">핵심 로직 다이어그램</h2>
+          <p class="subtitle">
+            README의 아키텍처를 기반으로, Query 분석·Window 검색·Refinement·Output 흐름을 한 번에 표현했습니다.
+          </p>
+
+          <div class="diagram-wrap">
+            <article class="mermaid-box">
+              <div class="mermaid">
+flowchart TB
+    subgraph TOP[" "]
+        direction LR
+        subgraph QRY["1) Query Analysis"]
+            A["User Query (Korean)"] --> B["Gemini Split + EN Rewrite"]
+            B --> C{"Split Success?"}
+            C -- "Yes" --> D["Sub-Queries (max 2)"]
+            C -- "No" --> E["Rule-based Fallback Split"]
+            E --> D
+        end
+
+        subgraph SRC["2) Window Search (CLIP)"]
+            V["Input Video"] --> W["Sliding Windows (p_sec, step_sec)"]
+            W --> X["Quick Sampling (q/3)"]
+            D --> Y["CLIP Similarity Scoring"]
+            X --> Y
+            Y --> Z{"Top-K Filled?"}
+            Z -- "No" --> F["Full Sampling (q)"]
+            Z -- "Yes" --> G{"quick_score >= threshold?"}
+            G -- "No" --> H["Skip Window"]
+            G -- "Yes" --> F
+            F --> I["Window Score + Best Frame"]
+            I --> J["Realtime Top-K Update"]
+            J --> K["Coarse Top-K Candidates"]
+        end
+    end
+
+    subgraph BOTTOM[" "]
+        direction LR
+        subgraph REF["3) Refinement"]
+            K --> L{"USE_BLIP?"}
+            L -- "Yes" --> M["BLIP Caption + Text Similarity"]
+            L -- "No" --> N["Keep CLIP Score"]
+            M --> O["Final Ranking"]
+            N --> O
+        end
+
+        subgraph EMA["4) EMA Temporal Refinement"]
+            D --> P["Global Frame Similarity Timeline"]
+            V --> P
+            P --> Q["EMA Segment Refinement (anchor-based)"]
+        end
+    end
+
+    subgraph OUT["5) Output"]
+        O --> R["Top-K Final Candidates"]
+        Q --> R
+        R --> S["JSON Results + Window/Frame Scores"]
+        R --> T["Realtime Viz + EMA Analysis Report"]
+    end
+
+    classDef query fill:#E3F2FD,stroke:#1E88E5,stroke-width:1.5px,color:#0D47A1;
+    classDef search fill:#E8F5E9,stroke:#2E7D32,stroke-width:1.5px,color:#1B5E20;
+    classDef refine fill:#FFECE9,stroke:#D43F3A,stroke-width:1.5px,color:#8A1F1B;
+    classDef ema fill:#EEF4FF,stroke:#2F6DF6,stroke-width:1.5px,color:#183B8E;
+    classDef output fill:#EDFBF4,stroke:#169B63,stroke-width:1.5px,color:#0A5A39;
+    classDef decision fill:#ECEFF1,stroke:#455A64,stroke-width:1.5px,color:#263238;
+
+    class A,B,D,E query;
+    class V,W,X,Y,F,H,I,J,K search;
+    class M,N,O refine;
+    class P,Q ema;
+    class R,S,T output;
+    class C,Z,G,L decision;
+              </div>
+            </article>
+
+            <aside class="legend">
+              <article class="legend-item">
+                <div class="tag"><i class="dot blue"></i>입력/분석</div>
+                사용자 쿼리를 Gemini로 분할/영문화하고 실패 시 규칙 기반 fallback으로 복구합니다.
+              </article>
+              <article class="legend-item">
+                <div class="tag"><i class="dot green"></i>검색 최적화</div>
+                q/3 빠른 샘플링과 Top-K 기반 필터링으로 긴 영상에서 연산량을 줄입니다.
+              </article>
+              <article class="legend-item">
+                <div class="tag"><i class="dot red"></i>결과 정밀화</div>
+                전역 유사도 타임라인에 EMA를 적용해 구간 경계를 안정화합니다.
+              </article>
+            </aside>
+          </div>
+        </section>
+
+        <section class="slide">
+          <span class="kicker">FUTURE ROADMAP</span>
+          <h2 class="slide-title">향후 발전 가능 포인트</h2>
+          <p class="subtitle">
+            현재 로직을 기반으로 정확도·속도·운영성을 더 끌어올릴 수 있는 실질적인 확장 항목입니다.
+          </p>
+
+          <div class="grid-2">
+            <article class="expand-card">
+              <button class="expand-head" aria-expanded="false">
+                <span>
+                  <strong>1) 적응형 경계 튜닝</strong><br/>
+                  <span>장르/길이별 threshold 자동 조정</span>
+                </span>
+                <i class="chev">⌄</i>
+              </button>
+              <div class="expand-body">
+                <div class="expand-inner">
+                  현재는 고정값 중심의 하이퍼파라미터를 사용합니다.
+                  영상 길이, 장면 전환 밀도, 쿼리 타입(단일/시퀀스)에 따라
+                  drop ratio와 임계치를 자동 튜닝하면 경계 품질을 더 안정화할 수 있습니다.
+                </div>
+              </div>
+            </article>
+
+            <article class="expand-card">
+              <button class="expand-head" aria-expanded="false">
+                <span>
+                  <strong>2) 쿼리 분할 품질 평가 체계</strong><br/>
+                  <span>분할 정확도와 retrieval 성능 연결</span>
+                </span>
+                <i class="chev">⌄</i>
+              </button>
+              <div class="expand-body">
+                <div class="expand-inner">
+                  Gemini 분할 결과의 품질을 정량화하고,
+                  분할 오류가 실제 retrieval 성능에 미치는 영향을 추적하는 지표 체계를 만들면
+                  모델/프롬프트 개선의 방향이 명확해집니다.
+                </div>
+              </div>
+            </article>
+
+            <article class="expand-card">
+              <button class="expand-head" aria-expanded="false">
+                <span>
+                  <strong>3) 경량 리랭커 도입</strong><br/>
+                  <span>BLIP 대체 semantic reranker</span>
+                </span>
+                <i class="chev">⌄</i>
+              </button>
+              <div class="expand-body">
+                <div class="expand-inner">
+                  캡션 편향과 비용 문제를 줄이기 위해,
+                  경량 텍스트-비전 리랭커를 후보 단계에만 선택적으로 적용하는 전략이 유효합니다.
+                  추론 비용 대비 정확도 향상을 목표로 실험할 수 있습니다.
+                </div>
+              </div>
+            </article>
+
+            <article class="expand-card">
+              <button class="expand-head" aria-expanded="false">
+                <span>
+                  <strong>4) 프로덕션화</strong><br/>
+                  <span>대용량 영상/배치 처리 파이프라인</span>
+                </span>
+                <i class="chev">⌄</i>
+              </button>
+              <div class="expand-body">
+                <div class="expand-inner">
+                  캐시, 분산 처리, 구간 인덱싱(사전 계산) 등을 추가하면
+                  다수 영상 라이브러리 환경에서도 실시간에 가까운 검색 UX를 제공할 수 있습니다.
+                </div>
+              </div>
+            </article>
+          </div>
+        </section>
+
+        <section class="slide">
+          <span class="kicker">SUMMARY</span>
+          <h2 class="slide-title">정리</h2>
+          <p class="subtitle">
+            이 프로젝트는 “텍스트로 장면을 찾는 문제”를 넘어 “맥락이 있는 시간 구간을 찾는 문제”로 확장해,
+            실제 사용자 경험에 가까운 Text-to-Video Retrieval 파이프라인을 구현했습니다.
+          </p>
+
+          <div class="grid-2">
+            <article class="panel">
+              <h3 style="margin:0 0 10px;font-size:18px;">핵심 성과</h3>
+              <p class="muted" style="margin:0;line-height:1.72;font-size:14px;">
+                - 쿼리 분할/영문화 + 단일/시퀀스 분리 검색<br/>
+                - 2단계 샘플링과 filtering mode로 속도 최적화<br/>
+                - EMA 기반 경계 정밀화 및 안정화 로직 확보
+              </p>
+            </article>
+            <article class="panel">
+              <h3 style="margin:0 0 10px;font-size:18px;">한 줄 메시지</h3>
+              <p class="muted" style="margin:0;line-height:1.72;font-size:15px;">
+                <span class="blue">기억은 흐릿해도</span>,<br/>
+                <span class="green">텍스트 설명만으로</span><br/>
+                <span class="red">원하는 장면과 구간을 다시 찾을 수 있게</span>.
+              </p>
+            </article>
+          </div>
+          <p class="footnote">좌우 화살표 버튼 또는 키보드 방향키로 슬라이드를 이동할 수 있습니다.</p>
+        </section>
+      </div>
+      <button class="nav next" id="nextBtn" aria-label="다음 슬라이드">›</button>
+    </main>
+
+    <footer class="bottombar" id="dots"></footer>
+  </div>
+
+  <script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+  <script>
+    (function () {
+      const slides = document.querySelectorAll(".slide");
+      const track = document.getElementById("slides");
+      const prevBtn = document.getElementById("prevBtn");
+      const nextBtn = document.getElementById("nextBtn");
+      const slideIndex = document.getElementById("slideIndex");
+      const slideTotal = document.getElementById("slideTotal");
+      const progressBar = document.getElementById("progressBar");
+      const dotsWrap = document.getElementById("dots");
+      let current = 0;
+      let touchStartX = 0;
+      let touchEndX = 0;
+
+      slideTotal.textContent = String(slides.length);
+
+      function renderDots() {
+        dotsWrap.innerHTML = "";
+        slides.forEach((_, idx) => {
+          const btn = document.createElement("button");
+          btn.className = "dot-nav" + (idx === current ? " active" : "");
+          btn.setAttribute("aria-label", `${idx + 1}번 슬라이드 이동`);
+          btn.addEventListener("click", () => goTo(idx));
+          dotsWrap.appendChild(btn);
+        });
+      }
+
+      function goTo(index) {
+        current = Math.max(0, Math.min(index, slides.length - 1));
+        track.style.transform = `translateX(-${current * 100}%)`;
+        slideIndex.textContent = String(current + 1);
+        prevBtn.disabled = current === 0;
+        nextBtn.disabled = current === slides.length - 1;
+        progressBar.style.width = `${((current + 1) / slides.length) * 100}%`;
+        renderDots();
+      }
+
+      prevBtn.addEventListener("click", () => goTo(current - 1));
+      nextBtn.addEventListener("click", () => goTo(current + 1));
+
+      window.addEventListener("keydown", (e) => {
+        if (e.key === "ArrowRight") goTo(current + 1);
+        if (e.key === "ArrowLeft") goTo(current - 1);
+      });
+
+      track.addEventListener("touchstart", (e) => {
+        touchStartX = e.changedTouches[0].screenX;
+      }, { passive: true });
+
+      track.addEventListener("touchend", (e) => {
+        touchEndX = e.changedTouches[0].screenX;
+        const delta = touchStartX - touchEndX;
+        if (Math.abs(delta) > 50) {
+          if (delta > 0) goTo(current + 1);
+          else goTo(current - 1);
+        }
+      }, { passive: true });
+
+      document.querySelectorAll(".expand-card").forEach((card) => {
+        const head = card.querySelector(".expand-head");
+        const body = card.querySelector(".expand-body");
+        head.addEventListener("click", () => {
+          const isOpen = card.classList.toggle("open");
+          head.setAttribute("aria-expanded", String(isOpen));
+          body.style.maxHeight = isOpen ? body.scrollHeight + "px" : "0px";
+        });
+      });
+
+      goTo(0);
+
+      if (window.mermaid) {
+        mermaid.initialize({
+          startOnLoad: true,
+          theme: "base",
+          securityLevel: "loose",
+          fontFamily: "Noto Sans KR, Space Grotesk, sans-serif",
+          themeVariables: {
+            primaryColor: "#ffffff",
+            primaryBorderColor: "#cfd7e6",
+            lineColor: "#4b5563",
+            textColor: "#1f2937",
+            clusterBkg: "#f7f9fc",
+            clusterBorder: "#d7deea"
+          }
+        });
+      }
+    })();
+  </script>
+</body>
+</html>
