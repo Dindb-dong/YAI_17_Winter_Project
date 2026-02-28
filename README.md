@@ -226,6 +226,7 @@ USE_LOOP = False
 ## Project Files
 
 - 준최종 노트북: `EMA_Refined_Video_Search.ipynb`
+- 발전 기록: `PROJECT_EVOLUTION.md`
 - 요약 문서: `IMPLEMENTATION_SUMMARY.md`
 - 최적화 문서: `OPTIMIZATION_REPORT.md`
 - 빠른 시작: `QUICK_START.md`
